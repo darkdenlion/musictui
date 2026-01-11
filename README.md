@@ -18,8 +18,12 @@ If macOS prompts for Automation access, allow your terminal to control Music.
 ## Controls
 - Up/Down or j/k: move selection
 - Enter: play selected playlist
-- Space: play/pause
+- Space: play/pause toggle
+- o: play
+- a: pause
+- s: stop
 - n: next track
 - p: previous track
 - r: refresh playlists + now playing
 - q: quit
+- Mouse: click buttons in the control strip
