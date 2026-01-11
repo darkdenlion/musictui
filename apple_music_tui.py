@@ -16,6 +16,8 @@ class TrackInfo:
     artist: str = ""
     album: str = ""
     state: str = "STOPPED"
+    duration: float = 0.0
+    position: float = 0.0
 
 
 @dataclass
@@ -36,6 +38,11 @@ def run_applescript(script: str) -> Tuple[str, str, int]:
     )
     out, err = proc.communicate()
     return out.strip(), err.strip(), proc.returncode
+
+
+def applescript_escape(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return escaped.replace("\n", " ").replace("\r", " ")
 
 
 def format_error(err: str) -> str:
@@ -59,7 +66,9 @@ def fetch_now_playing(state: AppState) -> None:
             set a to artist of t
             set al to album of t
             set s to player state as string
-            return n & "\\n" & a & "\\n" & al & "\\n" & s
+            set d to duration of t
+            set p to player position
+            return n & "\\n" & a & "\\n" & al & "\\n" & s & "\\n" & d & "\\n" & p
         end if
     end tell
     return "NOT_RUNNING"
@@ -76,22 +85,35 @@ def fetch_now_playing(state: AppState) -> None:
         state.now_playing = TrackInfo(state=out or "UNKNOWN")
         return
     parts = out.split("\n")
-    if len(parts) >= 4:
+    if len(parts) >= 6:
+        try:
+            duration = float(parts[4])
+        except ValueError:
+            duration = 0.0
+        try:
+            position = float(parts[5])
+        except ValueError:
+            position = 0.0
         state.now_playing = TrackInfo(
             name=parts[0],
             artist=parts[1],
             album=parts[2],
             state=parts[3].upper(),
+            duration=duration,
+            position=position,
         )
 
 
 def fetch_playlists(state: AppState) -> None:
     script = f'''
+    set AppleScript's text item delimiters to "\\n"
     tell application "{APP_NAME}"
-        set text item delimiters to "\\n"
-        set plist to name of playlists
-        return plist as text
+        if it is running then
+            set plist to name of playlists
+            return plist as text
+        end if
     end tell
+    return "NOT_RUNNING"
     '''
     out, err, code = run_applescript(script)
     err_msg = format_error(err)
@@ -100,6 +122,11 @@ def fetch_playlists(state: AppState) -> None:
         return
     if code != 0:
         state.status = "AppleScript failed."
+        return
+    if out in ("NOT_RUNNING", ""):
+        state.playlists = []
+        state.selected_index = 0
+        state.status = "Music app is not running."
         return
     playlists = [p.strip() for p in out.split("\n") if p.strip()]
     state.playlists = playlists
@@ -145,7 +172,7 @@ def play_selected_playlist(state: AppState) -> None:
     if not state.playlists:
         state.status = "No playlists found."
         return
-    name = state.playlists[state.selected_index]
+    name = applescript_escape(state.playlists[state.selected_index])
     script = f'''
     tell application "{APP_NAME}"
         play playlist "{name}"
@@ -162,13 +189,18 @@ def play_selected_playlist(state: AppState) -> None:
 
 
 def draw_header(stdscr, width, state: AppState, colors) -> None:
+    if width <= 0:
+        return
     header = " Apple Music Controller "
     status = state.now_playing.state or "UNKNOWN"
     badge = f" {status} "
     stdscr.attron(curses.color_pair(colors["header"]))
-    stdscr.addstr(0, 0, " " * (width - 1))
-    stdscr.addstr(0, 1, header[: max(0, width - 2)])
-    if width - len(badge) - 2 > 0:
+    if width == 1:
+        stdscr.addstr(0, 0, " ")
+    else:
+        stdscr.addstr(0, 0, " " * (width - 1))
+        stdscr.addstr(0, 1, header[: max(0, width - 2)])
+    if width > 1 and width - len(badge) - 2 > 0:
         stdscr.addstr(0, width - len(badge) - 2, badge)
     stdscr.attroff(curses.color_pair(colors["header"]))
 
@@ -191,7 +223,7 @@ def draw_box(stdscr, y, x, h, w, title, colors) -> None:
 
 def draw_now_playing(stdscr, y, x, h, w, state: AppState, colors) -> None:
     draw_box(stdscr, y, x, h, w, "Now Playing", colors)
-    if h < 5 or w < 10:
+    if h < 7 or w < 12:
         return
     content_y = y + 1
     content_x = x + 2
@@ -206,10 +238,35 @@ def draw_now_playing(stdscr, y, x, h, w, state: AppState, colors) -> None:
     stdscr.attron(curses.A_BOLD)
     stdscr.addstr(content_y, content_x, (info.name or "Untitled")[:max_text_w])
     stdscr.attroff(curses.A_BOLD)
-    if content_y + 1 < y + h - 1:
-        stdscr.addstr(content_y + 1, content_x, info.artist[:max_text_w])
-    if content_y + 2 < y + h - 1:
-        stdscr.addstr(content_y + 2, content_x, info.album[:max_text_w])
+    line = content_y + 1
+    if line < y + h - 1:
+        stdscr.addstr(line, content_x, info.artist[:max_text_w])
+    line += 1
+    if line < y + h - 1:
+        stdscr.addstr(line, content_x, info.album[:max_text_w])
+    line += 1
+    if line < y + h - 1:
+        bar = format_progress_bar(max_text_w, info.position, info.duration)
+        stdscr.addstr(line, content_x, bar[:max_text_w])
+    line += 1
+    if line < y + h - 1:
+        time_text = f"{format_time(info.position)} / {format_time(info.duration)}"
+        stdscr.addstr(line, content_x, time_text[:max_text_w])
+
+
+def draw_controls(stdscr, y, x, w, colors) -> None:
+    if w < 10:
+        return
+    controls = "[<<] [Play] [Pause] [Stop] [>>]"
+    hint = "n:next  p:prev  o:play  a:pause  s:stop  space:toggle"
+    stdscr.attron(curses.color_pair(colors["border"]))
+    stdscr.addstr(y, x, " " * (w - 1))
+    stdscr.attroff(curses.color_pair(colors["border"]))
+    stdscr.attron(curses.A_BOLD)
+    stdscr.addstr(y, x + 2, controls[: max(0, w - 4)])
+    stdscr.attroff(curses.A_BOLD)
+    if w > 20 and y + 1 < curses.LINES - 1:
+        stdscr.addstr(y + 1, x + 2, hint[: max(0, w - 4)])
 
 
 def draw_playlists(stdscr, y, x, h, w, state: AppState, colors) -> None:
@@ -240,12 +297,15 @@ def draw_playlists(stdscr, y, x, h, w, state: AppState, colors) -> None:
 
 
 def draw_status(stdscr, y, width, state: AppState, colors) -> None:
-    if y < 0:
+    if y < 0 or width <= 0:
         return
     status = state.status or "Ready."
     stdscr.attron(curses.color_pair(colors["status"]))
-    stdscr.addstr(y, 0, " " * (width - 1))
-    stdscr.addstr(y, 1, status[: max(0, width - 2)])
+    if width == 1:
+        stdscr.addstr(y, 0, " ")
+    else:
+        stdscr.addstr(y, 0, " " * (width - 1))
+        stdscr.addstr(y, 1, status[: max(0, width - 2)])
     stdscr.attroff(curses.color_pair(colors["status"]))
 
 
@@ -272,7 +332,8 @@ def draw_ui(stdscr, state: AppState, colors) -> None:
     draw_header(stdscr, width, state, colors)
 
     content_top = 1
-    content_height = height - 3
+    content_height = height - 4
+    controls_row = height - 3
     status_row = height - 2
 
     if content_height < 6:
@@ -291,6 +352,7 @@ def draw_ui(stdscr, state: AppState, colors) -> None:
         draw_now_playing(stdscr, content_top, 0, content_height, left_w, state, colors)
         draw_playlists(stdscr, content_top, left_w, content_height, right_w, state, colors)
 
+    draw_controls(stdscr, controls_row, 0, width, colors)
     draw_status(stdscr, status_row, width, state, colors)
     stdscr.refresh()
 
@@ -312,6 +374,12 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
         next_track(state)
     elif key in (ord("p"), ord("P")):
         previous_track(state)
+    elif key in (ord("o"), ord("O")):
+        play_track(state)
+    elif key in (ord("a"), ord("A")):
+        pause_track(state)
+    elif key in (ord("s"), ord("S")):
+        stop_track(state)
     elif key in (ord("r"), ord("R")):
         fetch_playlists(state)
         fetch_now_playing(state)
@@ -351,3 +419,57 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
+def play_track(state: AppState) -> None:
+    out, err, code = run_applescript(f'tell application "{APP_NAME}" to play')
+    err_msg = format_error(err)
+    if err_msg:
+        state.status = err_msg
+    elif code != 0:
+        state.status = "AppleScript failed."
+    else:
+        state.status = "Play."
+
+
+def pause_track(state: AppState) -> None:
+    out, err, code = run_applescript(f'tell application "{APP_NAME}" to pause')
+    err_msg = format_error(err)
+    if err_msg:
+        state.status = err_msg
+    elif code != 0:
+        state.status = "AppleScript failed."
+    else:
+        state.status = "Pause."
+
+
+def stop_track(state: AppState) -> None:
+    out, err, code = run_applescript(f'tell application "{APP_NAME}" to stop')
+    err_msg = format_error(err)
+    if err_msg:
+        state.status = err_msg
+    elif code != 0:
+        state.status = "AppleScript failed."
+    else:
+        state.status = "Stop."
+
+
+def format_time(seconds: float) -> str:
+    if seconds <= 0:
+        return "--:--"
+    total = int(seconds)
+    minutes = total // 60
+    secs = total % 60
+    return f"{minutes}:{secs:02d}"
+
+
+def format_progress_bar(width: int, position: float, duration: float) -> str:
+    if width <= 0:
+        return ""
+    if duration <= 0:
+        return "-" * width
+    ratio = max(0.0, min(1.0, position / duration))
+    filled = int(ratio * width)
+    if filled <= 0:
+        return ">" + "-" * (width - 1)
+    if filled >= width:
+        return "=" * width
+    return "=" * (filled - 1) + ">" + "-" * (width - filled)

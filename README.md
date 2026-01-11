@@ -9,7 +9,7 @@ Simple, modern terminal controller for Apple Music using Python and AppleScript.
 
 ## Run
 ```bash
-cd /Users/liandiwijaya/dev/apple/AppleMusic
+cd /Users/liandiwijaya/dev/apple/musictui
 python3 apple_music_tui.py
 ```
 
