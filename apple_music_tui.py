@@ -534,58 +534,56 @@ def draw_ui(stdscr, state: AppState, colors) -> None:
         stdscr.refresh()
         return
 
-    now_h = 8 if content_height >= 8 else max(5, content_height // 2)
-    if content_height - now_h < 5:
-        draw_now_playing(stdscr, content_top, 0, content_height, width, state, colors)
-    else:
-        draw_now_playing(stdscr, content_top, 0, now_h, width, state, colors)
-        bottom_top = content_top + now_h
-        bottom_h = content_height - now_h
-
-        if width < 90:
-            draw_playlists(stdscr, bottom_top, 0, bottom_h, width, state, colors)
+    if width < 80:
+        now_h = 8 if content_height >= 8 else max(5, content_height // 2)
+        if content_height - now_h < 5:
+            draw_now_playing(stdscr, content_top, 0, content_height, width, state, colors)
         else:
-            left_w = width * 2 // 3
-            right_w = width - left_w
-            draw_playlists(stdscr, bottom_top, 0, bottom_h, left_w, state, colors)
+            draw_now_playing(stdscr, content_top, 0, now_h, width, state, colors)
+            draw_playlists(
+                stdscr, content_top + now_h, 0, content_height - now_h, width, state, colors
+            )
+    else:
+        left_w = width * 2 // 3
+        right_w = width - left_w
+        now_h = 8 if content_height >= 8 else max(5, content_height // 2)
+        draw_now_playing(stdscr, content_top, 0, now_h, left_w, state, colors)
+        draw_playlists(
+            stdscr, content_top + now_h, 0, content_height - now_h, left_w, state, colors
+        )
 
-            if bottom_h >= 18:
-                base = bottom_h // 4
-                extra = bottom_h % 4
-                controls_h = base + (1 if extra > 0 else 0)
-                shortcuts_h = base + (1 if extra > 1 else 0)
-                queue_h = base + (1 if extra > 2 else 0)
-                stats_h = bottom_h - controls_h - shortcuts_h - queue_h
-                draw_controls_panel(stdscr, bottom_top, left_w, controls_h, right_w, state, colors)
-                draw_shortcuts_panel(
-                    stdscr, bottom_top + controls_h, left_w, shortcuts_h, right_w, colors
-                )
-                draw_queue_panel(
-                    stdscr,
-                    bottom_top + controls_h + shortcuts_h,
-                    left_w,
-                    queue_h,
-                    right_w,
-                    colors,
-                )
-                draw_stats_panel(
-                    stdscr,
-                    bottom_top + controls_h + shortcuts_h + queue_h,
-                    left_w,
-                    stats_h,
-                    right_w,
-                    state,
-                    colors,
-                )
-            elif bottom_h >= 10:
-                controls_h = bottom_h // 2
-                shortcuts_h = bottom_h - controls_h
-                draw_controls_panel(stdscr, bottom_top, left_w, controls_h, right_w, state, colors)
-                draw_shortcuts_panel(
-                    stdscr, bottom_top + controls_h, left_w, shortcuts_h, right_w, colors
-                )
-            else:
-                draw_controls_panel(stdscr, bottom_top, left_w, bottom_h, right_w, state, colors)
+        if content_height >= 18:
+            base = content_height // 4
+            extra = content_height % 4
+            controls_h = base + (1 if extra > 0 else 0)
+            shortcuts_h = base + (1 if extra > 1 else 0)
+            queue_h = base + (1 if extra > 2 else 0)
+            stats_h = content_height - controls_h - shortcuts_h - queue_h
+            draw_controls_panel(stdscr, content_top, left_w, controls_h, right_w, state, colors)
+            draw_shortcuts_panel(
+                stdscr, content_top + controls_h, left_w, shortcuts_h, right_w, colors
+            )
+            draw_queue_panel(
+                stdscr, content_top + controls_h + shortcuts_h, left_w, queue_h, right_w, colors
+            )
+            draw_stats_panel(
+                stdscr,
+                content_top + controls_h + shortcuts_h + queue_h,
+                left_w,
+                stats_h,
+                right_w,
+                state,
+                colors,
+            )
+        elif content_height >= 10:
+            controls_h = content_height // 2
+            shortcuts_h = content_height - controls_h
+            draw_controls_panel(stdscr, content_top, left_w, controls_h, right_w, state, colors)
+            draw_shortcuts_panel(
+                stdscr, content_top + controls_h, left_w, shortcuts_h, right_w, colors
+            )
+        else:
+            draw_controls_panel(stdscr, content_top, left_w, content_height, right_w, state, colors)
 
     draw_status(stdscr, status_row, width, state, colors)
     stdscr.refresh()
