@@ -385,11 +385,15 @@ def draw_now_playing(stdscr, y, x, h, w, state: AppState, colors) -> None:
     label_w = 8
     value_w = max(0, max_text_w - label_w - 1)
     line = content_y
+    shuffle_text = "ON" if state.shuffle_enabled else "OFF"
+    if state.shuffle_enabled is None:
+        shuffle_text = "UNKNOWN"
+    state_value = f"{info.state} | SHUFFLE {shuffle_text}"
     rows = [
         ("TITLE", info.name or "Untitled"),
         ("ARTIST", info.artist or "Unknown"),
         ("ALBUM", info.album or "Unknown"),
-        ("STATE", info.state),
+        ("STATE", state_value),
     ]
     for label, value in rows:
         if line >= y + h - 2:
@@ -405,15 +409,6 @@ def draw_now_playing(stdscr, y, x, h, w, state: AppState, colors) -> None:
         stdscr.addstr(line, content_x, f"{'TIME':<{label_w}}"[:label_w])
         stdscr.attroff(curses.A_DIM)
         stdscr.addstr(line, content_x + label_w + 1, time_text[:value_w])
-        line += 1
-    if line < y + h - 1:
-        shuffle_text = "ON" if state.shuffle_enabled else "OFF"
-        if state.shuffle_enabled is None:
-            shuffle_text = "UNKNOWN"
-        stdscr.attron(curses.A_DIM)
-        stdscr.addstr(line, content_x, f"{'SHUFFLE':<{label_w}}"[:label_w])
-        stdscr.attroff(curses.A_DIM)
-        stdscr.addstr(line, content_x + label_w + 1, shuffle_text[:value_w])
         line += 1
     if line < y + h - 1:
         progress_line = format_progress_line(max_text_w, info.position, info.duration)
@@ -584,12 +579,12 @@ def draw_status(stdscr, y, width, state: AppState, colors) -> None:
 def init_colors() -> dict:
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
     curses.init_pair(2, curses.COLOR_WHITE, -1)
-    curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_CYAN)
-    curses.init_pair(4, curses.COLOR_CYAN, -1)
+    curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_BLUE)
+    curses.init_pair(4, curses.COLOR_BLUE, -1)
     curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
-    curses.init_pair(6, curses.COLOR_CYAN, curses.COLOR_BLACK)
+    curses.init_pair(6, curses.COLOR_CYAN, -1)
 
     return {
         "header": 1,
@@ -617,7 +612,7 @@ def draw_ui(stdscr, state: AppState, colors) -> None:
         return
 
     if width < 80:
-        now_h = 8 if content_height >= 8 else max(5, content_height // 2)
+        now_h = 9 if content_height >= 9 else max(6, content_height // 2)
         if content_height - now_h < 5:
             draw_now_playing(stdscr, content_top, 0, content_height, width, state, colors)
         else:
@@ -629,7 +624,7 @@ def draw_ui(stdscr, state: AppState, colors) -> None:
     else:
         left_w = width * 2 // 3
         right_w = width - left_w
-        now_h = 8 if content_height >= 8 else max(5, content_height // 2)
+        now_h = 9 if content_height >= 9 else max(6, content_height // 2)
         draw_now_playing(stdscr, content_top, 0, now_h, left_w, state, colors)
         bottom_h = content_height - now_h
         draw_playlists(stdscr, content_top + now_h, 0, bottom_h, left_w, state, colors)
