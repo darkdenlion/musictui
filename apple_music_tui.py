@@ -80,6 +80,68 @@ def run_applescript(script: str) -> Tuple[str, str, int]:
     return out.strip(), err.strip(), proc.returncode
 
 
+def dump_music_ui(state: AppState) -> None:
+    script = f'''
+    on walk_element(el, depth)
+        set pad to ""
+        repeat depth times
+            set pad to pad & "  "
+        end repeat
+        set line to pad
+        try
+            set line to line & (role of el as text)
+        on error
+            set line to line & "UNKNOWN_ROLE"
+        end try
+        try
+            set sr to subrole of el as text
+            set line to line & " / " & sr
+        end try
+        try
+            set nm to name of el as text
+            if nm is not "" then set line to line & " | " & nm
+        end try
+        set output to line & "\\n"
+        if depth < 6 then
+            try
+                set kids to UI elements of el
+                repeat with child in kids
+                    set output to output & my walk_element(child, depth + 1)
+                end repeat
+            end try
+        end if
+        return output
+    end walk_element
+
+    tell application "System Events"
+        if not (exists process "{APP_NAME}") then
+            return "NO_PROCESS"
+        end if
+        tell process "{APP_NAME}"
+            if not (exists window 1) then
+                return "NO_WINDOW"
+            end if
+            try
+                return my walk_element(window 1, 0)
+            on error errMsg number errNum
+                return "ERR:" & errNum & ":" & errMsg
+            end try
+        end tell
+    end tell
+    '''
+    out, err, code = run_applescript(script)
+    if err or code != 0 or out.startswith("ERR:"):
+        state.status = "Failed to dump UI. Ensure Accessibility is enabled."
+        return
+    path = "/tmp/musictui_upnext.txt"
+    try:
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(out)
+        state.status = f"UI dump saved: {path}"
+    except OSError:
+        state.status = "Failed to write UI dump."
+
+
 def applescript_escape(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"')
     return escaped.replace("\n", " ").replace("\r", " ")
@@ -562,6 +624,7 @@ def draw_shortcuts_panel(stdscr, y, x, h, w, colors) -> None:
         "n/p: next/prev",
         "o/a/s: play/pause/stop",
         "x: shuffle",
+        "u: dump UI",
         "q: quit",
     ]
     content_y = y + 1
@@ -825,6 +888,8 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
     elif key in (ord("r"), ord("R")):
         fetch_playlists(state)
         fetch_now_playing(state)
+    elif key in (ord("u"), ord("U")):
+        dump_music_ui(state)
     elif key == curses.KEY_MOUSE:
         try:
             _, mx, my, _, mouse_state = curses.getmouse()
