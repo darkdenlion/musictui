@@ -48,10 +48,20 @@ class TrackInfo:
 
 
 @dataclass
+class UpNextInfo:
+    name: str = ""
+    artist: str = ""
+    album: str = ""
+    status: str = "UNKNOWN"
+
+
+@dataclass
 class AppState:
     playlists: List[str] = field(default_factory=list)
     selected_index: int = 0
     now_playing: TrackInfo = field(default_factory=TrackInfo)
+    up_next: UpNextInfo = field(default_factory=UpNextInfo)
+    up_next_source: str = "playlist"
     status: str = ""
     last_poll: float = 0.0
     last_position_time: float = 0.0
@@ -152,6 +162,102 @@ def fetch_now_playing(state: AppState) -> None:
             state=parts[3].upper(),
         )
         state.last_position_time = time.time()
+
+
+def fetch_up_next(state: AppState) -> None:
+    ui_info = fetch_up_next_ui()
+    if ui_info:
+        state.up_next = ui_info
+        state.up_next_source = "ui"
+        return
+    state.up_next_source = "playlist"
+    fetch_up_next_playlist(state)
+
+
+def fetch_up_next_ui() -> Optional[UpNextInfo]:
+    script = f'''
+    tell application "System Events"
+        if not (exists process "{APP_NAME}") then
+            return "NO_PROCESS"
+        end if
+        tell process "{APP_NAME}"
+            if not (exists window 1) then
+                return "NO_WINDOW"
+            end if
+            try
+                set theTable to first table of scroll area 1 of window 1
+                set row1 to first row of theTable
+                set texts to value of static text of row1
+                if (count of texts) >= 2 then
+                    return item 1 of texts & "\\n" & item 2 of texts
+                else if (count of texts) = 1 then
+                    return item 1 of texts
+                else
+                    return "NO_TEXT"
+                end if
+            on error errMsg number errNum
+                return "ERR:" & errNum & ":" & errMsg
+            end try
+        end tell
+    end tell
+    '''
+    out, err, code = run_applescript(script)
+    if err or code != 0:
+        return None
+    if out.startswith("ERR:") or out in ("NO_PROCESS", "NO_WINDOW", "NO_TEXT", ""):
+        return None
+    parts = out.split("\n")
+    name = parts[0] if parts else ""
+    artist = parts[1] if len(parts) > 1 else ""
+    return UpNextInfo(name=name, artist=artist, album="", status="OK")
+
+
+def fetch_up_next_playlist(state: AppState) -> None:
+    script = f'''
+    tell application "{APP_NAME}"
+        if it is running then
+            if player state is stopped then
+                return "STOPPED"
+            end if
+            try
+                set cp to current playlist
+                set ct to current track
+                set pid to persistent ID of ct
+                set tracksList to tracks of cp
+                repeat with i from 1 to count of tracksList
+                    if persistent ID of item i of tracksList is pid then
+                        if i < count of tracksList then
+                            set nt to item (i + 1) of tracksList
+                            return name of nt & "\\n" & artist of nt & "\\n" & album of nt
+                        else
+                            return "END"
+                        end if
+                    end if
+                end repeat
+                return "UNKNOWN"
+            on error
+                return "UNKNOWN"
+            end try
+        end if
+    end tell
+    return "NOT_RUNNING"
+    '''
+    out, err, code = run_applescript(script)
+    err_msg = format_error(err)
+    if err_msg or code != 0:
+        state.up_next = UpNextInfo(status="ERROR")
+        return
+    if out in ("STOPPED", "NOT_RUNNING", "UNKNOWN", "END", ""):
+        state.up_next = UpNextInfo(status=out or "UNKNOWN")
+        return
+    parts = out.split("\n")
+    if len(parts) >= 3:
+        state.up_next = UpNextInfo(
+            name=parts[0],
+            artist=parts[1],
+            album=parts[2],
+            status="OK",
+        )
 
 
 def fetch_playlists(state: AppState) -> None:
@@ -500,19 +606,38 @@ def draw_stats_panel(stdscr, y, x, h, w, state: AppState, colors) -> None:
         stdscr.addstr(row, content_x, line[:max_text_w])
 
 
-def draw_queue_panel(stdscr, y, x, h, w, colors) -> None:
+def draw_queue_panel(stdscr, y, x, h, w, state: AppState, colors) -> None:
     draw_box(stdscr, y, x, h, w, "Up Next", colors)
     if h < 4 or w < 20:
         return
-    lines = ["Queue view coming soon", "Use Playlists to switch"]
     content_y = y + 1
     content_x = x + 2
     max_text_w = w - 4
+    info = state.up_next
+    if info.status == "OK":
+        lines = [
+            info.name or "Untitled",
+            info.artist or "Unknown Artist",
+            info.album or "Unknown Album",
+        ]
+    elif info.status == "END":
+        lines = ["End of playlist"]
+    elif info.status == "STOPPED":
+        lines = ["Nothing playing"]
+    elif info.status == "NOT_RUNNING":
+        lines = ["Music app not running"]
+    else:
+        lines = ["Up Next unavailable"]
     for idx, line in enumerate(lines):
         row = content_y + idx
         if row >= y + h - 1:
             break
         stdscr.addstr(row, content_x, line[:max_text_w])
+    if content_y + len(lines) < y + h - 1:
+        source = "Up Next: UI" if state.up_next_source == "ui" else "Up Next: Playlist"
+        stdscr.attron(curses.A_DIM)
+        stdscr.addstr(content_y + len(lines), content_x, source[:max_text_w])
+        stdscr.attroff(curses.A_DIM)
 
 
 def draw_playlists(stdscr, y, x, h, w, state: AppState, colors) -> None:
@@ -579,12 +704,12 @@ def draw_status(stdscr, y, width, state: AppState, colors) -> None:
 def init_colors() -> dict:
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
+    curses.init_pair(1, curses.COLOR_BLUE, -1)
     curses.init_pair(2, curses.COLOR_WHITE, -1)
     curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_BLUE)
     curses.init_pair(4, curses.COLOR_BLUE, -1)
-    curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
-    curses.init_pair(6, curses.COLOR_CYAN, -1)
+    curses.init_pair(5, curses.COLOR_BLUE, -1)
+    curses.init_pair(6, curses.COLOR_BLUE, -1)
 
     return {
         "header": 1,
@@ -641,7 +766,13 @@ def draw_ui(stdscr, state: AppState, colors) -> None:
                 stdscr, content_top + controls_h, left_w, shortcuts_h, right_w, colors
             )
             draw_queue_panel(
-                stdscr, content_top + controls_h + shortcuts_h, left_w, queue_h, right_w, colors
+                stdscr,
+                content_top + controls_h + shortcuts_h,
+                left_w,
+                queue_h,
+                right_w,
+                state,
+                colors,
             )
             draw_stats_panel(
                 stdscr,
@@ -727,6 +858,7 @@ def main(stdscr) -> None:
     state = AppState()
     fetch_playlists(state)
     fetch_now_playing(state)
+    fetch_up_next(state)
     fetch_shuffle_state(state)
     state.last_poll = time.time()
 
@@ -735,6 +867,7 @@ def main(stdscr) -> None:
         now = time.time()
         if now - state.last_poll >= POLL_INTERVAL:
             fetch_now_playing(state)
+            fetch_up_next(state)
             fetch_shuffle_state(state)
             state.last_poll = now
         if state.now_playing.state == "PLAYING" and state.now_playing.duration > 0:
