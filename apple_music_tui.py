@@ -6,7 +6,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 APP_NAME = "Music"
 POLL_INTERVAL = 1.0
@@ -55,6 +55,7 @@ class AppState:
     status: str = ""
     last_poll: float = 0.0
     last_position_time: float = 0.0
+    shuffle_enabled: Optional[bool] = None
     controls: dict = field(default_factory=dict)
 
 
@@ -237,6 +238,76 @@ def play_selected_playlist(state: AppState) -> None:
         state.status = f"Playing playlist: {name}"
 
 
+def toggle_shuffle(state: AppState) -> None:
+    script = f'''
+    tell application "{APP_NAME}"
+        if it is running then
+            try
+                set thePlaylist to current playlist
+                set shuffle enabled of thePlaylist to not shuffle enabled of thePlaylist
+                return shuffle enabled of thePlaylist as string
+            on error errMsg number errNum
+                try
+                    set shuffle enabled to not shuffle enabled
+                    return shuffle enabled as string
+                on error errMsg2 number errNum2
+                    return "ERR:" & errNum2 & ":" & errMsg2
+                end try
+            end try
+        end if
+    end tell
+    return "NOT_RUNNING"
+    '''
+    out, err, code = run_applescript(script)
+    err_msg = format_error(err)
+    if err_msg:
+        state.status = err_msg
+    elif code != 0:
+        state.status = "AppleScript failed."
+    elif out.startswith("ERR:"):
+        state.status = "Shuffle failed."
+    elif out == "true":
+        state.status = "Shuffle on."
+    elif out == "false":
+        state.status = "Shuffle off."
+    else:
+        state.status = "Toggled shuffle."
+    fetch_shuffle_state(state)
+
+
+def fetch_shuffle_state(state: AppState) -> None:
+    script = f'''
+    tell application "{APP_NAME}"
+        if it is running then
+            try
+                set thePlaylist to current playlist
+                return shuffle enabled of thePlaylist as string
+            on error
+                try
+                    return shuffle enabled as string
+                on error
+                    return "UNKNOWN"
+                end try
+            end try
+        end if
+    end tell
+    return "UNKNOWN"
+    '''
+    out, err, code = run_applescript(script)
+    err_msg = format_error(err)
+    if err_msg or code != 0:
+        state.shuffle_enabled = None
+        return
+    if out == "true":
+        state.shuffle_enabled = True
+    elif out == "false":
+        state.shuffle_enabled = False
+    else:
+        state.shuffle_enabled = None
+
+
+
+
 def draw_header(stdscr, width, state: AppState, colors) -> None:
     if width <= 0:
         return
@@ -336,6 +407,15 @@ def draw_now_playing(stdscr, y, x, h, w, state: AppState, colors) -> None:
         stdscr.addstr(line, content_x + label_w + 1, time_text[:value_w])
         line += 1
     if line < y + h - 1:
+        shuffle_text = "ON" if state.shuffle_enabled else "OFF"
+        if state.shuffle_enabled is None:
+            shuffle_text = "UNKNOWN"
+        stdscr.attron(curses.A_DIM)
+        stdscr.addstr(line, content_x, f"{'SHUFFLE':<{label_w}}"[:label_w])
+        stdscr.attroff(curses.A_DIM)
+        stdscr.addstr(line, content_x + label_w + 1, shuffle_text[:value_w])
+        line += 1
+    if line < y + h - 1:
         progress_line = format_progress_line(max_text_w, info.position, info.duration)
         stdscr.attron(curses.color_pair(colors["accent"]))
         stdscr.addstr(line, content_x, progress_line[:max_text_w])
@@ -352,6 +432,7 @@ def draw_controls_panel(stdscr, y, x, h, w, state: AppState, colors) -> None:
         ("Pause", "Ⅱ a"),
         ("Stop", "■ s"),
         ("Next", "n ⟳"),
+        ("Shuffle", "⇆ x"),
     ]
     content_y = y + 1
     content_x = x + 2
@@ -366,7 +447,7 @@ def draw_controls_panel(stdscr, y, x, h, w, state: AppState, colors) -> None:
             state.controls[name] = (content_y, cursor_x, len(text))
         cursor_x += len(text) + 1
     stdscr.attroff(curses.A_BOLD)
-    hint = "space: toggle   r: refresh   click buttons"
+    hint = "space: toggle   x: shuffle   r: refresh"
     if content_y + 1 < y + h - 1:
         stdscr.addstr(content_y + 1, content_x, hint[:max_text_w])
 
@@ -379,6 +460,7 @@ def draw_shortcuts_panel(stdscr, y, x, h, w, colors) -> None:
         "j/k: move   Enter: play",
         "n/p: next/prev",
         "o/a/s: play/pause/stop",
+        "x: shuffle",
         "q: quit",
     ]
     content_y = y + 1
@@ -540,6 +622,7 @@ def draw_ui(stdscr, state: AppState, colors) -> None:
             draw_now_playing(stdscr, content_top, 0, content_height, width, state, colors)
         else:
             draw_now_playing(stdscr, content_top, 0, now_h, width, state, colors)
+            bottom_h = content_height - now_h
             draw_playlists(
                 stdscr, content_top + now_h, 0, content_height - now_h, width, state, colors
             )
@@ -548,9 +631,8 @@ def draw_ui(stdscr, state: AppState, colors) -> None:
         right_w = width - left_w
         now_h = 8 if content_height >= 8 else max(5, content_height // 2)
         draw_now_playing(stdscr, content_top, 0, now_h, left_w, state, colors)
-        draw_playlists(
-            stdscr, content_top + now_h, 0, content_height - now_h, left_w, state, colors
-        )
+        bottom_h = content_height - now_h
+        draw_playlists(stdscr, content_top + now_h, 0, bottom_h, left_w, state, colors)
 
         if content_height >= 18:
             base = content_height // 4
@@ -612,6 +694,8 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
         pause_track(state)
     elif key in (ord("s"), ord("S")):
         stop_track(state)
+    elif key in (ord("x"), ord("X")):
+        toggle_shuffle(state)
     elif key in (ord("r"), ord("R")):
         fetch_playlists(state)
         fetch_now_playing(state)
@@ -633,6 +717,8 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
                         pause_track(state)
                     elif name == "Stop":
                         stop_track(state)
+                    elif name == "Shuffle":
+                        toggle_shuffle(state)
     return True
 
 
@@ -646,6 +732,7 @@ def main(stdscr) -> None:
     state = AppState()
     fetch_playlists(state)
     fetch_now_playing(state)
+    fetch_shuffle_state(state)
     state.last_poll = time.time()
 
     running = True
@@ -653,6 +740,7 @@ def main(stdscr) -> None:
         now = time.time()
         if now - state.last_poll >= POLL_INTERVAL:
             fetch_now_playing(state)
+            fetch_shuffle_state(state)
             state.last_poll = now
         if state.now_playing.state == "PLAYING" and state.now_playing.duration > 0:
             if state.last_position_time:
