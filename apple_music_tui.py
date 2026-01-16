@@ -4,12 +4,14 @@ import locale
 import os
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 APP_NAME = "Music"
-POLL_INTERVAL = 1.0
+POLL_INTERVAL = 2.0
+APPLESCRIPT_TIMEOUT = 5.0
 HEADER_DIVIDER_ROWS = 2
 
 
@@ -67,17 +69,25 @@ class AppState:
     last_position_time: float = 0.0
     shuffle_enabled: Optional[bool] = None
     controls: dict = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    stop_event: threading.Event = field(default_factory=threading.Event)
+    playlists_loaded: bool = False
 
 
-def run_applescript(script: str) -> Tuple[str, str, int]:
+def run_applescript(script: str, timeout: float = APPLESCRIPT_TIMEOUT) -> Tuple[str, str, int]:
     proc = subprocess.Popen(
         ["/usr/bin/osascript", "-e", script],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
-    out, err = proc.communicate()
-    return out.strip(), err.strip(), proc.returncode
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return out.strip(), err.strip(), proc.returncode
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return "", "AppleScript timed out", -1
 
 
 def dump_music_ui(state: AppState) -> None:
@@ -474,6 +484,29 @@ def fetch_shuffle_state(state: AppState) -> None:
         state.shuffle_enabled = None
 
 
+def background_poll(state: AppState) -> None:
+    """Background thread that polls Music app without blocking the UI."""
+    fetch_playlists(state)
+    with state.lock:
+        state.playlists_loaded = True
+    fetch_now_playing(state)
+    fetch_up_next(state)
+    fetch_shuffle_state(state)
+
+    poll_count = 0
+    playlist_refresh_interval = 15  # Refresh playlists every ~30 seconds
+
+    while not state.stop_event.is_set():
+        state.stop_event.wait(POLL_INTERVAL)
+        if state.stop_event.is_set():
+            break
+        poll_count += 1
+        fetch_now_playing(state)
+        fetch_up_next(state)
+        fetch_shuffle_state(state)
+        if poll_count >= playlist_refresh_interval:
+            fetch_playlists(state)
+            poll_count = 0
 
 
 def draw_header(stdscr, width, state: AppState, colors) -> None:
@@ -714,7 +747,8 @@ def draw_playlists(stdscr, y, x, h, w, state: AppState, colors) -> None:
     max_text_w = w - 4
 
     if not state.playlists:
-        stdscr.addstr(content_y, content_x, "No playlists found."[:max_text_w])
+        msg = "Loading..." if not state.playlists_loaded else "No playlists found."
+        stdscr.addstr(content_y, content_x, msg[:max_text_w])
         return
 
     start = max(0, state.selected_index - max_rows + 1)
@@ -870,26 +904,26 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
         if state.selected_index > 0:
             state.selected_index -= 1
     elif key in (curses.KEY_ENTER, 10, 13):
-        play_selected_playlist(state)
+        threading.Thread(target=play_selected_playlist, args=(state,), daemon=True).start()
     elif key == ord(" "):
-        play_pause(state)
+        threading.Thread(target=play_pause, args=(state,), daemon=True).start()
     elif key in (ord("n"), ord("N")):
-        next_track(state)
+        threading.Thread(target=next_track, args=(state,), daemon=True).start()
     elif key in (ord("p"), ord("P")):
-        previous_track(state)
+        threading.Thread(target=previous_track, args=(state,), daemon=True).start()
     elif key in (ord("o"), ord("O")):
-        play_track(state)
+        threading.Thread(target=play_track, args=(state,), daemon=True).start()
     elif key in (ord("a"), ord("A")):
-        pause_track(state)
+        threading.Thread(target=pause_track, args=(state,), daemon=True).start()
     elif key in (ord("s"), ord("S")):
-        stop_track(state)
+        threading.Thread(target=stop_track, args=(state,), daemon=True).start()
     elif key in (ord("x"), ord("X")):
-        toggle_shuffle(state)
+        threading.Thread(target=toggle_shuffle, args=(state,), daemon=True).start()
     elif key in (ord("r"), ord("R")):
-        fetch_playlists(state)
-        fetch_now_playing(state)
+        state.status = "Refreshing..."
+        threading.Thread(target=lambda: (fetch_playlists(state), fetch_now_playing(state)), daemon=True).start()
     elif key in (ord("u"), ord("U")):
-        dump_music_ui(state)
+        threading.Thread(target=dump_music_ui, args=(state,), daemon=True).start()
     elif key == curses.KEY_MOUSE:
         try:
             _, mx, my, _, mouse_state = curses.getmouse()
@@ -899,17 +933,17 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
             for name, (y, x, w) in state.controls.items():
                 if my == y and x <= mx < x + w:
                     if name == "Prev":
-                        previous_track(state)
+                        threading.Thread(target=previous_track, args=(state,), daemon=True).start()
                     elif name == "Next":
-                        next_track(state)
+                        threading.Thread(target=next_track, args=(state,), daemon=True).start()
                     elif name == "Play":
-                        play_track(state)
+                        threading.Thread(target=play_track, args=(state,), daemon=True).start()
                     elif name == "Pause":
-                        pause_track(state)
+                        threading.Thread(target=pause_track, args=(state,), daemon=True).start()
                     elif name == "Stop":
-                        stop_track(state)
+                        threading.Thread(target=stop_track, args=(state,), daemon=True).start()
                     elif name == "Shuffle":
-                        toggle_shuffle(state)
+                        threading.Thread(target=toggle_shuffle, args=(state,), daemon=True).start()
     return True
 
 
@@ -921,32 +955,30 @@ def main(stdscr) -> None:
     colors = init_colors()
 
     state = AppState()
-    fetch_playlists(state)
-    fetch_now_playing(state)
-    fetch_up_next(state)
-    fetch_shuffle_state(state)
-    state.last_poll = time.time()
+    state.status = "Loading..."
+
+    poll_thread = threading.Thread(target=background_poll, args=(state,), daemon=True)
+    poll_thread.start()
 
     running = True
-    while running:
-        now = time.time()
-        if now - state.last_poll >= POLL_INTERVAL:
-            fetch_now_playing(state)
-            fetch_up_next(state)
-            fetch_shuffle_state(state)
-            state.last_poll = now
-        if state.now_playing.state == "PLAYING" and state.now_playing.duration > 0:
-            if state.last_position_time:
-                delta = max(0.0, now - state.last_position_time)
-                state.now_playing.position = min(
-                    state.now_playing.duration, state.now_playing.position + delta
-                )
-            state.last_position_time = now
-        draw_ui(stdscr, state, colors)
-        key = stdscr.getch()
-        if key != -1:
-            running = handle_key(stdscr, state, key)
-        time.sleep(0.03)
+    try:
+        while running:
+            now = time.time()
+            if state.now_playing.state == "PLAYING" and state.now_playing.duration > 0:
+                if state.last_position_time:
+                    delta = max(0.0, now - state.last_position_time)
+                    state.now_playing.position = min(
+                        state.now_playing.duration, state.now_playing.position + delta
+                    )
+                state.last_position_time = now
+            draw_ui(stdscr, state, colors)
+            key = stdscr.getch()
+            if key != -1:
+                running = handle_key(stdscr, state, key)
+            time.sleep(0.03)
+    finally:
+        state.stop_event.set()
+        poll_thread.join(timeout=1.0)
 
 
 def run() -> None:
