@@ -3444,6 +3444,19 @@ async fn main() -> io::Result<()> {
 
     let mut app = App::new(state.clone());
 
+    // Auto-scroll to the currently playing playlist
+    {
+        let st = state.lock().unwrap();
+        let cp = st.current_playlist.clone();
+        if !cp.is_empty() {
+            if let Some(pos) = app.filtered_indices.iter().position(|&idx| {
+                st.playlists.get(idx).map(|n| n.as_str()) == Some(&cp)
+            }) {
+                app.list_state.select(Some(pos));
+            }
+        }
+    }
+
     let mut last_tick = Instant::now();
 
     loop {
@@ -3453,8 +3466,34 @@ async fn main() -> io::Result<()> {
             if st.dirty {
                 st.dirty = false;
                 drop(st);
+                let view_playlist = if let BrowseView::Tracks(p) = &app.browse_view {
+                    Some(p.clone())
+                } else {
+                    None
+                };
                 match &app.browse_view {
-                    BrowseView::Tracks(_) => app.update_track_filter(),
+                    BrowseView::Tracks(_) => {
+                        app.update_track_filter();
+                        // Auto-scroll to now-playing track if at default position
+                        if app.track_list_state.selected() == Some(0) {
+                            if let Some(ref vp) = view_playlist {
+                                let st = state.lock().unwrap();
+                                if st.current_playlist == *vp {
+                                    let now_name = st.track.name.clone();
+                                    drop(st);
+                                    if !now_name.is_empty() {
+                                        let st2 = app.state.lock().unwrap();
+                                        if let Some(pos) = app.filtered_track_indices.iter().position(|&idx| {
+                                            st2.playlist_tracks.get(idx).map(|t| t.name.as_str()) == Some(&now_name)
+                                        }) {
+                                            drop(st2);
+                                            app.track_list_state.select(Some(pos));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     BrowseView::Artists => app.update_artist_filter(),
                     BrowseView::ArtistTracks(_) => app.update_artist_track_filter(),
                     _ => app.update_filter(),
