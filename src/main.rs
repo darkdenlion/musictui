@@ -1325,14 +1325,14 @@ fn cmd_set_repeat(mode: &str) {
 }
 
 fn cmd_add_to_playlist(playlist_name: &str) {
-    let escaped = playlist_name.replace('\\', "\\\\").replace('"', "\\\"");
+    let safe = applescript_escape(playlist_name);
     let _ = run_applescript(&format!(
         r#"tell application "{app}"
     set ct to current track
     duplicate ct to playlist "{pl}"
 end tell"#,
         app = APP_NAME,
-        pl = escaped,
+        pl = safe,
     ));
 }
 
@@ -1775,16 +1775,16 @@ fn draw_artist_list(f: &mut Frame, area: Rect, app: &mut App) {
     let items: Vec<ListItem> = app
         .filtered_artist_indices
         .iter()
-        .map(|&idx| {
-            let name = &artists[idx];
-            ListItem::new(Line::from(vec![
+        .filter_map(|&idx| {
+            let name = artists.get(idx)?;
+            Some(ListItem::new(Line::from(vec![
                 Span::styled("  ", Style::default()),
                 Span::styled(name.clone(), Style::default().fg(th.text)),
-            ]))
+            ])))
         })
         .collect();
 
-    let total = app.filtered_artist_indices.len();
+    let total = items.len();
     let inner_height = area.height.saturating_sub(2) as usize;
 
     let list = List::new(items)
@@ -1850,13 +1850,13 @@ fn draw_artist_tracks(f: &mut Frame, area: Rect, app: &mut App) {
     let items: Vec<ListItem> = app
         .filtered_artist_track_indices
         .iter()
-        .map(|&idx| {
-            let t = &tracks[idx];
+        .filter_map(|&idx| {
+            let t = tracks.get(idx)?;
             let is_playing = !now_playing.is_empty() && t.name == now_playing && t.artist == now_artist;
             let dur = format_time(t.duration);
             let prefix = if is_playing { "▶ " } else { "  " };
             let name_max = max_width.saturating_sub(dur.len() + prefix.len() + 3);
-            let name_display = if t.name.len() > name_max {
+            let name_display = if t.name.chars().count() > name_max {
                 let limit = name_max.saturating_sub(1);
                 let truncated: String = t.name.chars().take(limit).collect();
                 format!("{}…", truncated)
@@ -1867,15 +1867,15 @@ fn draw_artist_tracks(f: &mut Frame, area: Rect, app: &mut App) {
             let style = if is_playing { Style::default().fg(th.green) } else { Style::default().fg(th.text) };
             let dim_style = if is_playing { Style::default().fg(th.green) } else { Style::default().fg(th.text_dim) };
 
-            ListItem::new(Line::from(vec![
+            Some(ListItem::new(Line::from(vec![
                 Span::styled(prefix, style),
                 Span::styled(name_display, style),
                 Span::styled(format!("  {}", dur), dim_style),
-            ]))
+            ])))
         })
         .collect();
 
-    let total = app.filtered_artist_track_indices.len();
+    let total = items.len();
     let inner_height = area.height.saturating_sub(2) as usize;
 
     let list = List::new(items)
@@ -1961,10 +1961,10 @@ fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
     let items: Vec<ListItem> = app
         .filtered_indices
         .iter()
-        .map(|&idx| {
-            let name = &playlists[idx];
+        .filter_map(|&idx| {
+            let name = playlists.get(idx)?;
             let is_current = !current.is_empty() && name == &current;
-            if is_current {
+            Some(if is_current {
                 ListItem::new(Line::from(vec![
                     Span::styled("♫ ", Style::default().fg(th.green)),
                     Span::styled(name.clone(), Style::default().fg(th.green)),
@@ -1974,11 +1974,11 @@ fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
                     Span::styled("  ", Style::default()),
                     Span::styled(name.clone(), Style::default().fg(th.text)),
                 ]))
-            }
+            })
         })
         .collect();
 
-    let total = app.filtered_indices.len();
+    let total = items.len();
     let inner_height = area.height.saturating_sub(2) as usize;
 
     let list = List::new(items)
@@ -2071,15 +2071,15 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
     let items: Vec<ListItem> = app
         .filtered_track_indices
         .iter()
-        .map(|&idx| {
-            let t = &tracks[idx];
+        .filter_map(|&idx| {
+            let t = tracks.get(idx)?;
             let is_playing = !now_playing.is_empty()
                 && t.name == now_playing
                 && t.artist == now_artist;
             let dur = format_time(t.duration);
             let prefix = if is_playing { "▶ " } else { "  " };
-            let name_max = max_width.saturating_sub(dur.len() + prefix.len() + t.artist.len() + 5);
-            let name_display = if t.name.len() > name_max {
+            let name_max = max_width.saturating_sub(dur.len() + prefix.len() + t.artist.chars().count() + 5);
+            let name_display = if t.name.chars().count() > name_max {
                 let limit = name_max.saturating_sub(1);
                 let truncated: String = t.name.chars().take(limit).collect();
                 format!("{}…", truncated)
@@ -2098,17 +2098,17 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
                 Style::default().fg(th.text_dim)
             };
 
-            ListItem::new(Line::from(vec![
+            Some(ListItem::new(Line::from(vec![
                 Span::styled(prefix, style),
                 Span::styled(name_display, style),
                 Span::styled("  ", Style::default()),
-                Span::styled(&t.artist, dim_style),
+                Span::styled(t.artist.clone(), dim_style),
                 Span::styled(format!("  {}", dur), dim_style),
-            ]))
+            ])))
         })
         .collect();
 
-    let total = app.filtered_track_indices.len();
+    let total = items.len();
     let inner_height = area.height.saturating_sub(2) as usize;
 
     let list = List::new(items)
@@ -2199,8 +2199,8 @@ fn draw_global_search(f: &mut Frame, area: Rect, app: &mut App) {
                 !now_playing.is_empty() && t.name == now_playing && t.artist == now_artist;
             let dur = format_time(t.duration);
             let prefix = if is_playing { "▶ " } else { "  " };
-            let name_max = max_width.saturating_sub(dur.len() + prefix.len() + t.artist.len() + 5);
-            let name_display = if t.name.len() > name_max {
+            let name_max = max_width.saturating_sub(dur.len() + prefix.len() + t.artist.chars().count() + 5);
+            let name_display = if t.name.chars().count() > name_max {
                 let limit = name_max.saturating_sub(1);
                 let truncated: String = t.name.chars().take(limit).collect();
                 format!("{}…", truncated)
@@ -2223,7 +2223,7 @@ fn draw_global_search(f: &mut Frame, area: Rect, app: &mut App) {
                 Span::styled(prefix, style),
                 Span::styled(name_display, style),
                 Span::styled("  ", Style::default()),
-                Span::styled(&t.artist, dim_style),
+                Span::styled(t.artist.clone(), dim_style),
                 Span::styled(format!("  {}", dur), dim_style),
             ]))
         })
@@ -2307,7 +2307,7 @@ fn draw_up_next(f: &mut Frame, area: Rect, app: &App) {
         let max_width = area.width.saturating_sub(4) as usize;
         for (i, (name, artist)) in st.queue.iter().enumerate() {
             let num = format!("{:>2}. ", i + 1);
-            let name_display = if name.len() > max_width.saturating_sub(num.len()) {
+            let name_display = if name.chars().count() > max_width.saturating_sub(num.len()) {
                 let limit = max_width.saturating_sub(num.len() + 1);
                 let truncated: String = name.chars().take(limit).collect();
                 format!("{}…", truncated)
@@ -3530,20 +3530,24 @@ async fn main() -> io::Result<()> {
                     kind: MouseEventKind::ScrollDown,
                     ..
                 }) => {
-                    let len = active_list_len(&app);
-                    if len > 0 {
-                        let ls = active_list_state(&mut app);
-                        let sel = ls.selected().unwrap_or(0);
-                        ls.select(Some((sel + 3).min(len - 1)));
+                    if !app.show_airplay && !app.show_add_to_playlist && !app.show_help {
+                        let len = active_list_len(&app);
+                        if len > 0 {
+                            let ls = active_list_state(&mut app);
+                            let sel = ls.selected().unwrap_or(0);
+                            ls.select(Some((sel + 3).min(len - 1)));
+                        }
                     }
                 }
                 Event::Mouse(MouseEvent {
                     kind: MouseEventKind::ScrollUp,
                     ..
                 }) => {
-                    let ls = active_list_state(&mut app);
-                    if let Some(sel) = ls.selected() {
-                        ls.select(Some(sel.saturating_sub(3)));
+                    if !app.show_airplay && !app.show_add_to_playlist && !app.show_help {
+                        let ls = active_list_state(&mut app);
+                        if let Some(sel) = ls.selected() {
+                            ls.select(Some(sel.saturating_sub(3)));
+                        }
                     }
                 }
                 Event::Mouse(MouseEvent {
