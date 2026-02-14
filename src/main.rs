@@ -310,6 +310,8 @@ struct App {
     artist_track_list_state: ListState,
     filtered_artist_indices: Vec<usize>,
     filtered_artist_track_indices: Vec<usize>,
+    show_add_to_playlist: bool,
+    add_to_playlist_state: ListState,
 }
 
 impl App {
@@ -340,6 +342,8 @@ impl App {
             artist_track_list_state: ListState::default(),
             filtered_artist_indices: Vec::new(),
             filtered_artist_track_indices: Vec::new(),
+            show_add_to_playlist: false,
+            add_to_playlist_state: ListState::default(),
         };
         app.update_filter();
         app
@@ -1273,6 +1277,18 @@ fn cmd_set_repeat(mode: &str) {
     ));
 }
 
+fn cmd_add_to_playlist(playlist_name: &str) {
+    let escaped = playlist_name.replace('\\', "\\\\").replace('"', "\\\"");
+    let _ = run_applescript(&format!(
+        r#"tell application "{app}"
+    set ct to current track
+    duplicate ct to playlist "{pl}"
+end tell"#,
+        app = APP_NAME,
+        pl = escaped,
+    ));
+}
+
 // ── Format helpers ─────────────────────────────────────────────────
 
 fn format_time(seconds: f64) -> String {
@@ -1325,6 +1341,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
     if app.show_airplay {
         draw_airplay_overlay(f, size, app);
+    }
+    if app.show_add_to_playlist {
+        draw_add_to_playlist_overlay(f, size, app);
     }
 }
 
@@ -2282,7 +2301,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
 fn draw_help_overlay(f: &mut Frame, area: Rect, theme: &Theme) {
     let th = theme;
     let width = 52.min(area.width.saturating_sub(4));
-    let height = 26.min(area.height.saturating_sub(4));
+    let height = 30.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
     let y = (area.height.saturating_sub(height)) / 2;
     let popup = Rect::new(x, y, width, height);
@@ -2332,14 +2351,18 @@ fn draw_help_overlay(f: &mut Frame, area: Rect, theme: &Theme) {
                 ("g / G", "Top / Bottom"),
                 ("PgUp/Dn", "Page up / down"),
                 ("/", "Search playlists"),
-                ("Esc", "Cancel search"),
+                ("F1", "Global library search"),
+                ("F3", "Browse artists"),
             ],
         ),
         (
             "OTHER",
             vec![
+                ("o", "Add to playlist"),
+                ("a", "AirPlay devices"),
                 ("t", "Cycle theme"),
                 ("r", "Refresh playlists"),
+                ("F2", "Mini player"),
                 ("?", "Toggle this help"),
                 ("q", "Quit"),
             ],
@@ -2424,6 +2447,62 @@ fn draw_airplay_overlay(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_stateful_widget(list, popup, &mut app.airplay_list_state);
 }
 
+fn draw_add_to_playlist_overlay(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
+    let st = app.state.lock().unwrap();
+    let playlists = st.playlists.clone();
+    drop(st);
+
+    let width = 40.min(area.width.saturating_sub(4));
+    let height = (playlists.len() as u16 + 4).min(area.height.saturating_sub(4)).max(5);
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " Add to Playlist ",
+            Style::default().fg(th.accent).bold(),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(th.accent))
+        .style(Style::default().bg(th.surface));
+
+    if playlists.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("  No playlists found", Style::default().fg(th.dim)))
+                .block(block),
+            popup,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = playlists
+        .iter()
+        .map(|name| {
+            ListItem::new(Span::styled(
+                format!("  {}", name),
+                Style::default().fg(th.text),
+            ))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(th.highlight_bg)
+                .fg(th.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+
+    f.render_stateful_widget(list, popup, &mut app.add_to_playlist_state);
+}
+
 // ── Event handling ─────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, key: KeyEvent) {
@@ -2443,6 +2522,12 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     // AirPlay overlay handles its own keys
     if app.show_airplay {
         handle_airplay_key(app, key);
+        return;
+    }
+
+    // Add-to-playlist overlay handles its own keys
+    if app.show_add_to_playlist {
+        handle_add_to_playlist_key(app, key);
         return;
     }
 
@@ -2532,6 +2617,40 @@ fn handle_airplay_key(app: &mut App, key: KeyEvent) {
                     // Refresh devices after a short delay
                     let devices = fetch_airplay_devices();
                     app.airplay_devices = devices;
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_add_to_playlist_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('o') | KeyCode::Char('q') => {
+            app.show_add_to_playlist = false;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let len = app.state.lock().unwrap().playlists.len();
+            if len > 0 {
+                let sel = app.add_to_playlist_state.selected().unwrap_or(0);
+                app.add_to_playlist_state.select(Some((sel + 1).min(len - 1)));
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(sel) = app.add_to_playlist_state.selected() {
+                app.add_to_playlist_state.select(Some(sel.saturating_sub(1)));
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(sel) = app.add_to_playlist_state.selected() {
+                let st = app.state.lock().unwrap();
+                if let Some(playlist_name) = st.playlists.get(sel).cloned() {
+                    let track_name = st.track.name.clone();
+                    drop(st);
+                    app.set_status(&format!("Added \"{}\" to {}", track_name, playlist_name));
+                    let pn = playlist_name.clone();
+                    std::thread::spawn(move || cmd_add_to_playlist(&pn));
+                    app.show_add_to_playlist = false;
                 }
             }
         }
@@ -3080,6 +3199,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.airplay_devices = fetch_airplay_devices();
             app.airplay_list_state.select(Some(0));
             app.show_airplay = true;
+        }
+        KeyCode::Char('o') | KeyCode::Char('O') => {
+            app.add_to_playlist_state.select(Some(0));
+            app.show_add_to_playlist = true;
         }
         KeyCode::F(2) => {
             app.mini_mode = !app.mini_mode;
