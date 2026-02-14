@@ -66,6 +66,7 @@ struct TrackInfo {
     state: PlayerState,
     duration: f64,
     position: f64,
+    loved: Option<bool>,
 }
 
 impl Default for TrackInfo {
@@ -77,6 +78,7 @@ impl Default for TrackInfo {
             state: PlayerState::Stopped,
             duration: 0.0,
             position: 0.0,
+            loved: None,
         }
     }
 }
@@ -386,7 +388,11 @@ fn fetch_now_playing() -> TrackInfo {
     if it is running then
         if player state is stopped then return "STOPPED"
         set t to current track
-        return name of t & "\n" & artist of t & "\n" & album of t & "\n" & (player state as string) & "\n" & duration of t & "\n" & player position
+        set lv to false
+        try
+            set lv to loved of t
+        end try
+        return name of t & "\n" & artist of t & "\n" & album of t & "\n" & (player state as string) & "\n" & duration of t & "\n" & player position & "\n" & (lv as string)
     end if
 end tell
 return "NOT_RUNNING""#,
@@ -403,6 +409,11 @@ return "NOT_RUNNING""#,
             }
             let parts: Vec<&str> = out.split('\n').collect();
             if parts.len() >= 6 {
+                let loved = parts.get(6).and_then(|s| match s.trim() {
+                    "true" => Some(true),
+                    "false" => Some(false),
+                    _ => None,
+                });
                 TrackInfo {
                     name: parts[0].to_string(),
                     artist: parts[1].to_string(),
@@ -410,6 +421,7 @@ return "NOT_RUNNING""#,
                     state: PlayerState::from_str(parts[3]),
                     duration: parse_number(parts[4]),
                     position: parse_number(parts[5]),
+                    loved,
                 }
             } else {
                 TrackInfo::default()
@@ -781,6 +793,23 @@ end tell"#,
     let _ = run_applescript(&script);
 }
 
+fn cmd_toggle_love() {
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        if player state is not stopped then
+            set t to current track
+            try
+                set loved of t to not loved of t
+            end try
+        end if
+    end if
+end tell"#,
+        APP_NAME
+    );
+    let _ = run_applescript(&script);
+}
+
 fn cmd_set_repeat(mode: &str) {
     let _ = run_applescript(&format!(
         r#"tell application "{}" to set song repeat to {}"#,
@@ -917,10 +946,14 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App) {
         return;
     }
 
-    let title = Line::from(Span::styled(
+    let mut title_spans = vec![Span::styled(
         t.name.clone(),
         Style::default().fg(TEXT).bold(),
-    ));
+    )];
+    if t.loved == Some(true) {
+        title_spans.push(Span::styled("  ♥", Style::default().fg(RED)));
+    }
+    let title = Line::from(title_spans);
     let subtitle = Line::from(vec![
         Span::styled(t.artist.clone(), Style::default().fg(TEXT_DIM)),
         Span::styled("  ·  ", Style::default().fg(DIM)),
@@ -1351,10 +1384,11 @@ fn draw_keyhints(f: &mut Frame, area: Rect) {
         ("n / p", "next / prev", false),
         ("+ / -", "volume", false),
         ("← / →", "seek ±10s", false),
+        ("l", "love / unlove", false),
         ("x", "shuffle", false),
         ("v", "repeat", false),
         ("/", "search", false),
-        ("Enter", "play playlist", false),
+        ("Enter", "open / play", false),
         ("m", "mute", false),
         ("?", "help", false),
         ("q", "quit", false),
@@ -1425,6 +1459,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
                 ("Space", "Play / Pause"),
                 ("n  p", "Next / Previous"),
                 ("s", "Stop"),
+                ("l", "Love / Unlove track"),
                 ("x", "Shuffle"),
                 ("v", "Repeat (off → all → one)"),
             ],
@@ -1441,7 +1476,9 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
             "NAVIGATION",
             vec![
                 ("j / k / ↑↓", "Move up / down"),
-                ("Enter", "Play selected playlist"),
+                ("Enter", "Open / Play selected"),
+                ("Esc", "Back to playlists"),
+                ("Tab", "Play whole playlist"),
                 ("g / G", "Top / Bottom"),
                 ("PgUp/Dn", "Page up / down"),
                 ("/", "Search playlists"),
@@ -1618,6 +1655,23 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('s') | KeyCode::Char('S') => {
             app.set_status("Stopped");
             std::thread::spawn(cmd_stop);
+        }
+        KeyCode::Char('l') | KeyCode::Char('L') => {
+            let state = app.state.clone();
+            std::thread::spawn(move || {
+                cmd_toggle_love();
+                // Fetch updated state
+                let track = fetch_now_playing();
+                let mut st = state.lock().unwrap();
+                let loved = track.loved;
+                st.track.loved = loved;
+                st.status = match loved {
+                    Some(true) => "♥ Loved".into(),
+                    Some(false) => "♡ Unloved".into(),
+                    None => "Love toggled".into(),
+                };
+                st.status_time = Instant::now();
+            });
         }
         KeyCode::Char('x') | KeyCode::Char('X') => {
             let state = app.state.clone();
