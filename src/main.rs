@@ -289,6 +289,7 @@ struct App {
     filtered_track_indices: Vec<usize>,
     show_help: bool,
     should_quit: bool,
+    mini_mode: bool,
     theme_name: ThemeName,
     theme: Theme,
 }
@@ -307,6 +308,7 @@ impl App {
             filtered_track_indices: Vec::new(),
             show_help: false,
             should_quit: false,
+            mini_mode: false,
             theme_name,
             theme: theme_name.theme(),
         };
@@ -1004,6 +1006,11 @@ fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
     f.render_widget(Block::default().style(Style::default().bg(app.theme.surface)), size);
 
+    if app.mini_mode {
+        draw_mini(f, size, app);
+        return;
+    }
+
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1019,6 +1026,59 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     if app.show_help {
         draw_help_overlay(f, size, &app.theme);
+    }
+}
+
+fn draw_mini(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
+    let st = app.state.lock().unwrap();
+    let t = &st.track;
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1), Constraint::Min(0)])
+        .split(area);
+
+    // Line 1: state icon + track name + artist + duration
+    let icon = t.state.icon();
+    let pos_str = format_time(t.position);
+    let dur_str = format_time(t.duration);
+
+    let mut spans = vec![
+        Span::styled(format!(" {} ", icon), Style::default().fg(t.state.color(th)).bold()),
+    ];
+
+    if t.name.is_empty() {
+        spans.push(Span::styled("No track", Style::default().fg(th.dim)));
+    } else {
+        spans.push(Span::styled(&t.name, Style::default().fg(th.text).bold()));
+        spans.push(Span::styled(" · ", Style::default().fg(th.dim)));
+        spans.push(Span::styled(&t.artist, Style::default().fg(th.text_dim)));
+    }
+
+    if t.duration > 0.0 {
+        let time_str = format!("  {}/{}", pos_str, dur_str);
+        spans.push(Span::styled(time_str, Style::default().fg(th.text_dim)));
+    }
+
+    if t.loved == Some(true) {
+        spans.push(Span::styled(" ♥", Style::default().fg(th.red)));
+    }
+
+    f.render_widget(Paragraph::new(Line::from(spans)), chunks[0]);
+
+    // Line 2: progress bar
+    if t.duration > 0.0 {
+        let ratio = (t.position / t.duration).clamp(0.0, 1.0);
+        let bar_width = area.width.saturating_sub(2) as usize;
+        let filled = (ratio * bar_width as f64) as usize;
+        let empty = bar_width.saturating_sub(filled);
+        let bar = Line::from(vec![
+            Span::styled(" ", Style::default()),
+            Span::styled("━".repeat(filled), Style::default().fg(th.accent)),
+            Span::styled("╌".repeat(empty), Style::default().fg(th.dim)),
+        ]);
+        f.render_widget(Paragraph::new(bar), chunks[1]);
     }
 }
 
@@ -1720,6 +1780,13 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // F2 toggles mini mode from anywhere
+    if key.code == KeyCode::F(2) {
+        app.mini_mode = !app.mini_mode;
+        app.set_status(if app.mini_mode { "Mini mode" } else { "Full mode" });
+        return;
+    }
+
     match app.input_mode {
         InputMode::Search => handle_search_key(app, key),
         InputMode::Normal => handle_normal_key(app, key),
@@ -2109,6 +2176,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('t') | KeyCode::Char('T') => {
             app.cycle_theme();
+        }
+        KeyCode::F(2) => {
+            app.mini_mode = !app.mini_mode;
+            app.set_status(if app.mini_mode { "Mini mode" } else { "Full mode" });
         }
         _ => {}
     }
