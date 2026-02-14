@@ -163,6 +163,7 @@ enum BrowseView {
     GlobalSearch,
     Artists,
     ArtistTracks(String), // artist name
+    RecentlyPlayed,
 }
 
 #[derive(Clone, Debug)]
@@ -254,6 +255,8 @@ struct AppState {
     dirty: bool,
     artists: Vec<String>,
     artist_tracks: Vec<PlaylistTrack>,
+    recent_tracks: Vec<(String, String)>, // (name, artist) — most recent first
+    last_track_name: String,
 }
 
 impl Default for AppState {
@@ -276,6 +279,8 @@ impl Default for AppState {
             dirty: false,
             artists: Vec::new(),
             artist_tracks: Vec::new(),
+            recent_tracks: Vec::new(),
+            last_track_name: String::new(),
         }
     }
 }
@@ -312,6 +317,7 @@ struct App {
     filtered_artist_track_indices: Vec<usize>,
     show_add_to_playlist: bool,
     add_to_playlist_state: ListState,
+    recent_list_state: ListState,
 }
 
 impl App {
@@ -344,6 +350,7 @@ impl App {
             filtered_artist_track_indices: Vec::new(),
             show_add_to_playlist: false,
             add_to_playlist_state: ListState::default(),
+            recent_list_state: ListState::default(),
         };
         app.update_filter();
         app
@@ -1623,7 +1630,64 @@ fn draw_playlist(f: &mut Frame, area: Rect, app: &mut App) {
         BrowseView::GlobalSearch => draw_global_search(f, area, app),
         BrowseView::Artists => draw_artist_list(f, area, app),
         BrowseView::ArtistTracks(_) => draw_artist_tracks(f, area, app),
+        BrowseView::RecentlyPlayed => draw_recently_played(f, area, app),
     }
+}
+
+fn draw_recently_played(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
+    let st = app.state.lock().unwrap();
+    let recent = st.recent_tracks.clone();
+    drop(st);
+
+    let title = format!(" Recently Played ({}) ", recent.len());
+
+    let block = Block::default()
+        .title(Span::styled(title, Style::default().fg(th.accent).bold()))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(th.border))
+        .style(Style::default().bg(th.surface));
+
+    if recent.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "  No recently played tracks yet",
+                Style::default().fg(th.dim),
+            ))
+            .block(block),
+            area,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = recent
+        .iter()
+        .enumerate()
+        .map(|(i, (name, artist))| {
+            let num = format!(" {:>2}. ", i + 1);
+            let max_name = (area.width as usize).saturating_sub(num.len() + artist.len() + 6);
+            let display_name: String = name.chars().take(max_name).collect();
+            ListItem::new(Line::from(vec![
+                Span::styled(num, Style::default().fg(th.dim)),
+                Span::styled(display_name, Style::default().fg(th.text)),
+                Span::styled(" — ", Style::default().fg(th.dim)),
+                Span::styled(artist.clone(), Style::default().fg(th.dim)),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(th.highlight_bg)
+                .fg(th.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+
+    f.render_stateful_widget(list, area, &mut app.recent_list_state);
 }
 
 fn draw_artist_list(f: &mut Frame, area: Rect, app: &mut App) {
@@ -2359,6 +2423,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect, theme: &Theme) {
             "OTHER",
             vec![
                 ("o", "Add to playlist"),
+                ("h", "Recently played"),
                 ("a", "AirPlay devices"),
                 ("t", "Cycle theme"),
                 ("r", "Refresh playlists"),
@@ -2664,7 +2729,7 @@ fn update_current_filter(app: &mut App) {
         BrowseView::Tracks(_) => app.update_track_filter(),
         BrowseView::Artists => app.update_artist_filter(),
         BrowseView::ArtistTracks(_) => app.update_artist_track_filter(),
-        BrowseView::GlobalSearch => {}
+        BrowseView::GlobalSearch | BrowseView::RecentlyPlayed => {}
     }
 }
 
@@ -2749,7 +2814,7 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
                         });
                     }
                 }
-                BrowseView::GlobalSearch => {}
+                BrowseView::GlobalSearch | BrowseView::RecentlyPlayed => {}
             }
             app.input_mode = InputMode::Normal;
             app.search_query.clear();
@@ -2788,6 +2853,7 @@ fn active_list_len(app: &App) -> usize {
         BrowseView::GlobalSearch => app.global_search_results.len(),
         BrowseView::Artists => app.filtered_artist_indices.len(),
         BrowseView::ArtistTracks(_) => app.filtered_artist_track_indices.len(),
+        BrowseView::RecentlyPlayed => app.state.lock().unwrap().recent_tracks.len(),
     }
 }
 
@@ -2798,6 +2864,7 @@ fn active_list_state(app: &mut App) -> &mut ListState {
         BrowseView::GlobalSearch => &mut app.global_search_state,
         BrowseView::Artists => &mut app.artist_list_state,
         BrowseView::ArtistTracks(_) => &mut app.artist_track_list_state,
+        BrowseView::RecentlyPlayed => &mut app.recent_list_state,
     }
 }
 
@@ -2815,7 +2882,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                     app.search_query.clear();
                     app.update_artist_filter();
                 }
-                BrowseView::Tracks(_) | BrowseView::GlobalSearch | BrowseView::Artists => {
+                BrowseView::Tracks(_) | BrowseView::GlobalSearch | BrowseView::Artists | BrowseView::RecentlyPlayed => {
                     app.browse_view = BrowseView::Playlists;
                     app.search_query.clear();
                     app.update_filter();
@@ -3036,7 +3103,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                     app.search_query.clear();
                     app.update_artist_filter();
                 }
-                BrowseView::Tracks(_) | BrowseView::GlobalSearch | BrowseView::Artists => {
+                BrowseView::Tracks(_) | BrowseView::GlobalSearch | BrowseView::Artists | BrowseView::RecentlyPlayed => {
                     app.browse_view = BrowseView::Playlists;
                     app.search_query.clear();
                     app.update_filter();
@@ -3126,6 +3193,16 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         }
                     }
                 }
+                BrowseView::RecentlyPlayed => {
+                    if let Some(sel) = app.recent_list_state.selected() {
+                        let st = app.state.lock().unwrap();
+                        if let Some((name, artist)) = st.recent_tracks.get(sel).cloned() {
+                            drop(st);
+                            app.set_status(&format!("Playing: {}", name));
+                            std::thread::spawn(move || cmd_play_library_track(&name, &artist));
+                        }
+                    }
+                }
             }
         }
         KeyCode::Tab => {
@@ -3204,6 +3281,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.add_to_playlist_state.select(Some(0));
             app.show_add_to_playlist = true;
         }
+        KeyCode::Char('h') | KeyCode::Char('H') => {
+            app.browse_view = BrowseView::RecentlyPlayed;
+            app.recent_list_state.select(Some(0));
+        }
         KeyCode::F(2) => {
             app.mini_mode = !app.mini_mode;
             app.set_status(if app.mini_mode { "Mini mode" } else { "Full mode" });
@@ -3253,6 +3334,7 @@ async fn main() -> io::Result<()> {
 
         let mut st = state.lock().unwrap();
         st.playlists = playlists;
+        st.last_track_name = track.name.clone();
         st.track = track;
         st.volume = vol;
         st.shuffle = shuf;
@@ -3284,6 +3366,22 @@ async fn main() -> io::Result<()> {
             let queue = fetch_queue(10);
 
             let mut st = poll_state.lock().unwrap();
+            // Track recently played: if track changed, push the old one
+            if !track.name.is_empty()
+                && !st.last_track_name.is_empty()
+                && track.name != st.last_track_name
+            {
+                let old_name = st.last_track_name.clone();
+                let old_artist = st.track.artist.clone();
+                // Avoid consecutive duplicates
+                if st.recent_tracks.first().map(|(n, _)| n.as_str()) != Some(&old_name) {
+                    st.recent_tracks.insert(0, (old_name, old_artist));
+                    if st.recent_tracks.len() > 50 {
+                        st.recent_tracks.truncate(50);
+                    }
+                }
+            }
+            st.last_track_name = track.name.clone();
             st.track = track;
             st.volume = vol;
             st.shuffle = shuf;
