@@ -161,6 +161,8 @@ enum BrowseView {
     Playlists,
     Tracks(String), // playlist name
     GlobalSearch,
+    Artists,
+    ArtistTracks(String), // artist name
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +252,8 @@ struct AppState {
     status: String,
     status_time: Instant,
     dirty: bool,
+    artists: Vec<String>,
+    artist_tracks: Vec<PlaylistTrack>,
 }
 
 impl Default for AppState {
@@ -270,6 +274,8 @@ impl Default for AppState {
             status: "Loading...".into(),
             status_time: Instant::now(),
             dirty: false,
+            artists: Vec::new(),
+            artist_tracks: Vec::new(),
         }
     }
 }
@@ -300,6 +306,10 @@ struct App {
     global_search_results: Vec<PlaylistTrack>,
     global_search_state: ListState,
     global_search_query: String,
+    artist_list_state: ListState,
+    artist_track_list_state: ListState,
+    filtered_artist_indices: Vec<usize>,
+    filtered_artist_track_indices: Vec<usize>,
 }
 
 impl App {
@@ -326,9 +336,71 @@ impl App {
             global_search_results: Vec::new(),
             global_search_state: ListState::default(),
             global_search_query: String::new(),
+            artist_list_state: ListState::default(),
+            artist_track_list_state: ListState::default(),
+            filtered_artist_indices: Vec::new(),
+            filtered_artist_track_indices: Vec::new(),
         };
         app.update_filter();
         app
+    }
+
+    fn update_artist_filter(&mut self) {
+        let st = self.state.lock().unwrap();
+        let query = &self.search_query;
+        if query.is_empty() {
+            self.filtered_artist_indices = (0..st.artists.len()).collect();
+        } else {
+            let mut scored: Vec<(usize, i32)> = st
+                .artists
+                .iter()
+                .enumerate()
+                .filter_map(|(i, name)| fuzzy_score(query, name).map(|s| (i, s)))
+                .collect();
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            self.filtered_artist_indices = scored.into_iter().map(|(i, _)| i).collect();
+        }
+        drop(st);
+
+        if self.filtered_artist_indices.is_empty() {
+            self.artist_list_state.select(None);
+        } else if let Some(sel) = self.artist_list_state.selected() {
+            if sel >= self.filtered_artist_indices.len() {
+                self.artist_list_state
+                    .select(Some(self.filtered_artist_indices.len() - 1));
+            }
+        } else {
+            self.artist_list_state.select(Some(0));
+        }
+    }
+
+    fn update_artist_track_filter(&mut self) {
+        let st = self.state.lock().unwrap();
+        let query = &self.search_query;
+        if query.is_empty() {
+            self.filtered_artist_track_indices = (0..st.artist_tracks.len()).collect();
+        } else {
+            let mut scored: Vec<(usize, i32)> = st
+                .artist_tracks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| fuzzy_score(query, &t.name).map(|s| (i, s)))
+                .collect();
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            self.filtered_artist_track_indices = scored.into_iter().map(|(i, _)| i).collect();
+        }
+        drop(st);
+
+        if self.filtered_artist_track_indices.is_empty() {
+            self.artist_track_list_state.select(None);
+        } else if let Some(sel) = self.artist_track_list_state.selected() {
+            if sel >= self.filtered_artist_track_indices.len() {
+                self.artist_track_list_state
+                    .select(Some(self.filtered_artist_track_indices.len() - 1));
+            }
+        } else {
+            self.artist_track_list_state.select(Some(0));
+        }
     }
 
     fn cycle_theme(&mut self) {
@@ -1023,6 +1095,91 @@ return "NONE""#,
     }
 }
 
+fn fetch_artists() -> Vec<String> {
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        try
+            set allArtists to artist of tracks of playlist "Library"
+            set uniqueArts to {{}}
+            repeat with a in allArtists
+                set artStr to a as string
+                if artStr is not in uniqueArts and artStr is not "" then
+                    set end of uniqueArts to artStr
+                end if
+            end repeat
+            set AppleScript's text item delimiters to "\n"
+            return uniqueArts as text
+        end try
+    end if
+end tell
+return "NONE""#,
+        APP_NAME
+    );
+
+    match run_applescript(&script) {
+        Ok(out) => {
+            if out == "NONE" || out.is_empty() {
+                return Vec::new();
+            }
+            let mut artists: Vec<String> = out
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            artists.sort_by(|a, b| a.to_lowercase().cmp(&b.to_lowercase()));
+            artists
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn fetch_artist_tracks(artist: &str) -> Vec<PlaylistTrack> {
+    let safe = applescript_escape(artist);
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        try
+            set results to (every track of playlist "Library" whose artist is "{}")
+            set out to ""
+            set idx to 0
+            repeat with t in results
+                set idx to idx + 1
+                set out to out & name of t & "\t" & artist of t & "\t" & (duration of t as string) & "\t" & (idx as string) & "\n"
+            end repeat
+            return out
+        end try
+    end if
+end tell
+return "NONE""#,
+        APP_NAME, safe
+    );
+
+    match run_applescript(&script) {
+        Ok(out) => {
+            if out == "NONE" || out.is_empty() {
+                return Vec::new();
+            }
+            out.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() >= 3 {
+                        Some(PlaylistTrack {
+                            name: parts[0].to_string(),
+                            artist: parts[1].to_string(),
+                            duration: parse_number(parts[2]),
+                            index: parts.get(3).map(|s| parse_number(s) as usize).unwrap_or(0),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 fn fetch_library_search(query: &str, max_results: usize) -> Vec<PlaylistTrack> {
     let safe = applescript_escape(query);
     let script = format!(
@@ -1445,6 +1602,182 @@ fn draw_playlist(f: &mut Frame, area: Rect, app: &mut App) {
         BrowseView::Playlists => draw_playlist_list(f, area, app),
         BrowseView::Tracks(_) => draw_track_list(f, area, app),
         BrowseView::GlobalSearch => draw_global_search(f, area, app),
+        BrowseView::Artists => draw_artist_list(f, area, app),
+        BrowseView::ArtistTracks(_) => draw_artist_tracks(f, area, app),
+    }
+}
+
+fn draw_artist_list(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
+    let st = app.state.lock().unwrap();
+    let artists = st.artists.clone();
+    drop(st);
+
+    let title = match &app.input_mode {
+        InputMode::Search => {
+            let blink = if (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                / 500)
+                % 2
+                == 0
+            { "▏" } else { " " };
+            format!(" Search: {}{} ", app.search_query, blink)
+        }
+        InputMode::Normal => format!(" Artists ({}) ◂ Esc ", app.filtered_artist_indices.len()),
+    };
+
+    let border_color = match &app.input_mode {
+        InputMode::Search => th.accent,
+        InputMode::Normal => th.accent,
+    };
+
+    let block = Block::default()
+        .title(Span::styled(&title, Style::default().fg(th.text_dim).bold()))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(th.surface));
+
+    if artists.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("  Loading artists...", Style::default().fg(th.dim)))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .filtered_artist_indices
+        .iter()
+        .map(|&idx| {
+            let name = &artists[idx];
+            ListItem::new(Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(name.clone(), Style::default().fg(th.text)),
+            ]))
+        })
+        .collect();
+
+    let total = app.filtered_artist_indices.len();
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(th.highlight_bg)
+                .fg(th.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+
+    f.render_stateful_widget(list, area, &mut app.artist_list_state);
+
+    if total > inner_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(th.accent))
+            .track_style(Style::default().fg(th.border));
+        let mut scrollbar_state = ScrollbarState::new(total)
+            .position(app.artist_list_state.selected().unwrap_or(0));
+        let scroll_area = Rect {
+            x: area.x, y: area.y + 1,
+            width: area.width, height: area.height.saturating_sub(2),
+        };
+        f.render_stateful_widget(scrollbar, scroll_area, &mut scrollbar_state);
+    }
+}
+
+fn draw_artist_tracks(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
+    let st = app.state.lock().unwrap();
+    let tracks = st.artist_tracks.clone();
+    let now_playing = st.track.name.clone();
+    let now_artist = st.track.artist.clone();
+    drop(st);
+
+    let artist_name = if let BrowseView::ArtistTracks(ref name) = app.browse_view {
+        name.clone()
+    } else {
+        String::new()
+    };
+
+    let title = format!(" {} ({}) ◂ Esc ", artist_name, app.filtered_artist_track_indices.len());
+
+    let block = Block::default()
+        .title(Span::styled(&title, Style::default().fg(th.text_dim).bold()))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(th.accent))
+        .style(Style::default().bg(th.surface));
+
+    if tracks.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("  Loading...", Style::default().fg(th.dim)))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let max_width = area.width.saturating_sub(8) as usize;
+
+    let items: Vec<ListItem> = app
+        .filtered_artist_track_indices
+        .iter()
+        .map(|&idx| {
+            let t = &tracks[idx];
+            let is_playing = !now_playing.is_empty() && t.name == now_playing && t.artist == now_artist;
+            let dur = format_time(t.duration);
+            let prefix = if is_playing { "▶ " } else { "  " };
+            let name_max = max_width.saturating_sub(dur.len() + prefix.len() + 3);
+            let name_display = if t.name.len() > name_max {
+                let limit = name_max.saturating_sub(1);
+                let truncated: String = t.name.chars().take(limit).collect();
+                format!("{}…", truncated)
+            } else {
+                t.name.clone()
+            };
+
+            let style = if is_playing { Style::default().fg(th.green) } else { Style::default().fg(th.text) };
+            let dim_style = if is_playing { Style::default().fg(th.green) } else { Style::default().fg(th.text_dim) };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(name_display, style),
+                Span::styled(format!("  {}", dur), dim_style),
+            ]))
+        })
+        .collect();
+
+    let total = app.filtered_artist_track_indices.len();
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(th.highlight_bg)
+                .fg(th.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+
+    f.render_stateful_widget(list, area, &mut app.artist_track_list_state);
+
+    if total > inner_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(th.accent))
+            .track_style(Style::default().fg(th.border));
+        let mut scrollbar_state = ScrollbarState::new(total)
+            .position(app.artist_track_list_state.selected().unwrap_or(0));
+        let scroll_area = Rect {
+            x: area.x, y: area.y + 1,
+            width: area.width, height: area.height.saturating_sub(2),
+        };
+        f.render_stateful_widget(scrollbar, scroll_area, &mut scrollbar_state);
     }
 }
 
@@ -2206,11 +2539,18 @@ fn handle_airplay_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn handle_search_key(app: &mut App, key: KeyEvent) {
-    let in_tracks = matches!(app.browse_view, BrowseView::Tracks(_));
-    let in_global = matches!(app.browse_view, BrowseView::GlobalSearch);
+fn update_current_filter(app: &mut App) {
+    match app.browse_view {
+        BrowseView::Playlists => app.update_filter(),
+        BrowseView::Tracks(_) => app.update_track_filter(),
+        BrowseView::Artists => app.update_artist_filter(),
+        BrowseView::ArtistTracks(_) => app.update_artist_track_filter(),
+        BrowseView::GlobalSearch => {}
+    }
+}
 
-    if in_global {
+fn handle_search_key(app: &mut App, key: KeyEvent) {
+    if matches!(app.browse_view, BrowseView::GlobalSearch) {
         handle_global_search_key(app, key);
         return;
     }
@@ -2219,55 +2559,86 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.search_query.clear();
-            if in_tracks {
-                app.update_track_filter();
-            } else {
-                app.update_filter();
-            }
+            update_current_filter(app);
         }
         KeyCode::Enter => {
-            if in_tracks {
-                if let Some(track) = app.selected_track() {
-                    if let BrowseView::Tracks(ref playlist) = app.browse_view {
-                        let playlist = playlist.clone();
-                        let track_name = track.name.clone();
-                        let track_idx = track.index;
-                        app.set_status(&format!("Playing: {}", track_name));
+            match app.browse_view {
+                BrowseView::Tracks(_) => {
+                    if let Some(track) = app.selected_track() {
+                        if let BrowseView::Tracks(ref playlist) = app.browse_view {
+                            let playlist = playlist.clone();
+                            let track_name = track.name.clone();
+                            let track_idx = track.index;
+                            app.set_status(&format!("Playing: {}", track_name));
+                            std::thread::spawn(move || {
+                                cmd_play_track_in_playlist(&playlist, track_idx);
+                            });
+                        }
+                    }
+                }
+                BrowseView::Artists => {
+                    if let Some(sel) = app.artist_list_state.selected() {
+                        if let Some(&idx) = app.filtered_artist_indices.get(sel) {
+                            let st = app.state.lock().unwrap();
+                            if let Some(artist_name) = st.artists.get(idx).cloned() {
+                                drop(st);
+                                let name_clone = artist_name.clone();
+                                app.set_status(&format!("Loading: {}", artist_name));
+                                app.browse_view = BrowseView::ArtistTracks(artist_name);
+                                app.artist_track_list_state.select(Some(0));
+                                let state = app.state.clone();
+                                std::thread::spawn(move || {
+                                    let tracks = fetch_artist_tracks(&name_clone);
+                                    let mut st = state.lock().unwrap();
+                                    st.status = format!("{} — {} tracks", name_clone, tracks.len());
+                                    st.status_time = Instant::now();
+                                    st.artist_tracks = tracks;
+                                    st.dirty = true;
+                                });
+                            }
+                        }
+                    }
+                }
+                BrowseView::ArtistTracks(_) => {
+                    if let Some(sel) = app.artist_track_list_state.selected() {
+                        if let Some(&idx) = app.filtered_artist_track_indices.get(sel) {
+                            let st = app.state.lock().unwrap();
+                            if let Some(track) = st.artist_tracks.get(idx) {
+                                let name = track.name.clone();
+                                let track_artist = track.artist.clone();
+                                drop(st);
+                                app.set_status(&format!("Playing: {}", name));
+                                std::thread::spawn(move || cmd_play_library_track(&name, &track_artist));
+                            }
+                        }
+                    }
+                }
+                BrowseView::Playlists => {
+                    if let Some(name) = app.selected_playlist_name() {
+                        let name_clone = name.clone();
+                        app.set_status(&format!("Loading tracks: {}", name));
+                        app.browse_view = BrowseView::Tracks(name.clone());
+                        app.track_list_state.select(Some(0));
+                        let state = app.state.clone();
                         std::thread::spawn(move || {
-                            cmd_play_track_in_playlist(&playlist, track_idx);
+                            let tracks = fetch_playlist_tracks(&name_clone);
+                            let mut st = state.lock().unwrap();
+                            st.status = format!("{} — {} tracks", name_clone, tracks.len());
+                            st.status_time = Instant::now();
+                            st.playlist_tracks = tracks;
+                            st.dirty = true;
                         });
                     }
                 }
-            } else if let Some(name) = app.selected_playlist_name() {
-                let name_clone = name.clone();
-                app.set_status(&format!("Loading tracks: {}", name));
-                app.browse_view = BrowseView::Tracks(name.clone());
-                app.track_list_state.select(Some(0));
-                let state = app.state.clone();
-                std::thread::spawn(move || {
-                    let tracks = fetch_playlist_tracks(&name_clone);
-                    let mut st = state.lock().unwrap();
-                    st.status = format!("{} — {} tracks", name_clone, tracks.len());
-                    st.status_time = Instant::now();
-                    st.playlist_tracks = tracks;
-                    st.dirty = true;
-                });
+                BrowseView::GlobalSearch => {}
             }
             app.input_mode = InputMode::Normal;
             app.search_query.clear();
-            if in_tracks {
-                app.update_track_filter();
-            } else {
-                app.update_filter();
-            }
+            update_current_filter(app);
         }
         KeyCode::Backspace => {
             app.search_query.pop();
-            if in_tracks {
-                app.update_track_filter();
-            } else {
-                app.update_filter();
-            }
+            update_current_filter(app);
         }
         KeyCode::Down => {
             let len = active_list_len(app);
@@ -2285,11 +2656,7 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char(c) => {
             app.search_query.push(c);
-            if in_tracks {
-                app.update_track_filter();
-            } else {
-                app.update_filter();
-            }
+            update_current_filter(app);
         }
         _ => {}
     }
@@ -2300,6 +2667,8 @@ fn active_list_len(app: &App) -> usize {
         BrowseView::Playlists => app.filtered_indices.len(),
         BrowseView::Tracks(_) => app.filtered_track_indices.len(),
         BrowseView::GlobalSearch => app.global_search_results.len(),
+        BrowseView::Artists => app.filtered_artist_indices.len(),
+        BrowseView::ArtistTracks(_) => app.filtered_artist_track_indices.len(),
     }
 }
 
@@ -2308,6 +2677,8 @@ fn active_list_state(app: &mut App) -> &mut ListState {
         BrowseView::Playlists => &mut app.list_state,
         BrowseView::Tracks(_) => &mut app.track_list_state,
         BrowseView::GlobalSearch => &mut app.global_search_state,
+        BrowseView::Artists => &mut app.artist_list_state,
+        BrowseView::ArtistTracks(_) => &mut app.artist_track_list_state,
     }
 }
 
@@ -2319,12 +2690,20 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
 
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => {
-            if matches!(app.browse_view, BrowseView::Tracks(_) | BrowseView::GlobalSearch) {
-                app.browse_view = BrowseView::Playlists;
-                app.search_query.clear();
-                app.update_filter();
-            } else {
-                app.should_quit = true;
+            match &app.browse_view {
+                BrowseView::ArtistTracks(_) => {
+                    app.browse_view = BrowseView::Artists;
+                    app.search_query.clear();
+                    app.update_artist_filter();
+                }
+                BrowseView::Tracks(_) | BrowseView::GlobalSearch | BrowseView::Artists => {
+                    app.browse_view = BrowseView::Playlists;
+                    app.search_query.clear();
+                    app.update_filter();
+                }
+                BrowseView::Playlists => {
+                    app.should_quit = true;
+                }
             }
         }
         KeyCode::Char('?') => app.show_help = !app.show_help,
@@ -2532,10 +2911,18 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Esc => {
-            if matches!(app.browse_view, BrowseView::Tracks(_) | BrowseView::GlobalSearch) {
-                app.browse_view = BrowseView::Playlists;
-                app.search_query.clear();
-                app.update_filter();
+            match &app.browse_view {
+                BrowseView::ArtistTracks(_) => {
+                    app.browse_view = BrowseView::Artists;
+                    app.search_query.clear();
+                    app.update_artist_filter();
+                }
+                BrowseView::Tracks(_) | BrowseView::GlobalSearch | BrowseView::Artists => {
+                    app.browse_view = BrowseView::Playlists;
+                    app.search_query.clear();
+                    app.update_filter();
+                }
+                _ => {}
             }
         }
         KeyCode::Enter => {
@@ -2579,6 +2966,47 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         }
                     }
                 }
+                BrowseView::Artists => {
+                    if let Some(sel) = app.artist_list_state.selected() {
+                        let idx = app.filtered_artist_indices.get(sel).copied();
+                        if let Some(idx) = idx {
+                            let st = app.state.lock().unwrap();
+                            if let Some(artist_name) = st.artists.get(idx).cloned() {
+                                drop(st);
+                                let name_clone = artist_name.clone();
+                                app.set_status(&format!("Loading: {}", artist_name));
+                                app.browse_view = BrowseView::ArtistTracks(artist_name);
+                                app.artist_track_list_state.select(Some(0));
+                                app.search_query.clear();
+                                let state = app.state.clone();
+                                std::thread::spawn(move || {
+                                    let tracks = fetch_artist_tracks(&name_clone);
+                                    let mut st = state.lock().unwrap();
+                                    st.status = format!("{} — {} tracks", name_clone, tracks.len());
+                                    st.status_time = Instant::now();
+                                    st.artist_tracks = tracks;
+                                    st.dirty = true;
+                                });
+                            }
+                        }
+                    }
+                }
+                BrowseView::ArtistTracks(_) => {
+                    let sel = app.artist_track_list_state.selected();
+                    if let Some(sel) = sel {
+                        let idx = app.filtered_artist_track_indices.get(sel).copied();
+                        if let Some(idx) = idx {
+                            let st = app.state.lock().unwrap();
+                            if let Some(track) = st.artist_tracks.get(idx) {
+                                let name = track.name.clone();
+                                let track_artist = track.artist.clone();
+                                drop(st);
+                                app.set_status(&format!("Playing: {}", name));
+                                std::thread::spawn(move || cmd_play_library_track(&name, &track_artist));
+                            }
+                        }
+                    }
+                }
             }
         }
         KeyCode::Tab => {
@@ -2609,6 +3037,29 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.global_search_query.clear();
             app.global_search_results.clear();
             app.global_search_state.select(None);
+        }
+        KeyCode::F(3) => {
+            // F3 opens artist browser
+            let st = app.state.lock().unwrap();
+            let has_artists = !st.artists.is_empty();
+            drop(st);
+            if has_artists {
+                app.browse_view = BrowseView::Artists;
+                app.search_query.clear();
+                app.update_artist_filter();
+            } else {
+                app.set_status("Loading artists...");
+                let state = app.state.clone();
+                std::thread::spawn(move || {
+                    let artists = fetch_artists();
+                    let mut st = state.lock().unwrap();
+                    st.status = format!("{} artists loaded", artists.len());
+                    st.status_time = Instant::now();
+                    st.artists = artists;
+                    st.dirty = true;
+                });
+                app.browse_view = BrowseView::Artists;
+            }
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             let state = app.state.clone();
@@ -2741,10 +3192,11 @@ async fn main() -> io::Result<()> {
             if st.dirty {
                 st.dirty = false;
                 drop(st);
-                if matches!(app.browse_view, BrowseView::Tracks(_)) {
-                    app.update_track_filter();
-                } else {
-                    app.update_filter();
+                match &app.browse_view {
+                    BrowseView::Tracks(_) => app.update_track_filter(),
+                    BrowseView::Artists => app.update_artist_filter(),
+                    BrowseView::ArtistTracks(_) => app.update_artist_track_filter(),
+                    _ => app.update_filter(),
                 }
             }
         }
