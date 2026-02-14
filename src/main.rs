@@ -45,6 +45,20 @@ const HIGHLIGHT_BG: Color = Color::Rgb(60, 60, 80);
 // ── Data ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
+struct PlaylistTrack {
+    name: String,
+    artist: String,
+    duration: f64,
+    index: usize, // 1-based index in the playlist
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum BrowseView {
+    Playlists,
+    Tracks(String), // playlist name
+}
+
+#[derive(Clone, Debug)]
 struct TrackInfo {
     name: String,
     artist: String,
@@ -116,6 +130,7 @@ impl PlayerState {
 struct AppState {
     track: TrackInfo,
     playlists: Vec<String>,
+    playlist_tracks: Vec<PlaylistTrack>,
     up_next_name: String,
     up_next_artist: String,
     shuffle: Option<bool>,
@@ -133,6 +148,7 @@ impl Default for AppState {
         Self {
             track: TrackInfo::default(),
             playlists: Vec::new(),
+            playlist_tracks: Vec::new(),
             up_next_name: String::new(),
             up_next_artist: String::new(),
             shuffle: None,
@@ -155,9 +171,12 @@ enum InputMode {
 struct App {
     state: Arc<Mutex<AppState>>,
     list_state: ListState,
+    track_list_state: ListState,
+    browse_view: BrowseView,
     input_mode: InputMode,
     search_query: String,
     filtered_indices: Vec<usize>,
+    filtered_track_indices: Vec<usize>,
     show_help: bool,
     should_quit: bool,
 }
@@ -167,9 +186,12 @@ impl App {
         let mut app = Self {
             state,
             list_state: ListState::default(),
+            track_list_state: ListState::default(),
+            browse_view: BrowseView::Playlists,
             input_mode: InputMode::Normal,
             search_query: String::new(),
             filtered_indices: Vec::new(),
+            filtered_track_indices: Vec::new(),
             show_help: false,
             should_quit: false,
         };
@@ -204,11 +226,49 @@ impl App {
         }
     }
 
+    fn update_track_filter(&mut self) {
+        let st = self.state.lock().unwrap();
+        let query = self.search_query.to_lowercase();
+        if query.is_empty() {
+            self.filtered_track_indices = (0..st.playlist_tracks.len()).collect();
+        } else {
+            self.filtered_track_indices = st
+                .playlist_tracks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| {
+                    t.name.to_lowercase().contains(&query)
+                        || t.artist.to_lowercase().contains(&query)
+                })
+                .map(|(i, _)| i)
+                .collect();
+        }
+        drop(st);
+
+        if self.filtered_track_indices.is_empty() {
+            self.track_list_state.select(None);
+        } else if let Some(sel) = self.track_list_state.selected() {
+            if sel >= self.filtered_track_indices.len() {
+                self.track_list_state
+                    .select(Some(self.filtered_track_indices.len() - 1));
+            }
+        } else {
+            self.track_list_state.select(Some(0));
+        }
+    }
+
     fn selected_playlist_name(&self) -> Option<String> {
         let sel = self.list_state.selected()?;
         let idx = *self.filtered_indices.get(sel)?;
         let st = self.state.lock().unwrap();
         st.playlists.get(idx).cloned()
+    }
+
+    fn selected_track(&self) -> Option<PlaylistTrack> {
+        let sel = self.track_list_state.selected()?;
+        let idx = *self.filtered_track_indices.get(sel)?;
+        let st = self.state.lock().unwrap();
+        st.playlist_tracks.get(idx).cloned()
     }
 
     fn set_status(&self, msg: &str) {
@@ -487,6 +547,53 @@ return """#,
     run_applescript(&script).unwrap_or_default()
 }
 
+fn fetch_playlist_tracks(playlist_name: &str) -> Vec<PlaylistTrack> {
+    let safe = applescript_escape(playlist_name);
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        try
+            set p to playlist "{}"
+            set tl to tracks of p
+            set out to ""
+            repeat with i from 1 to count of tl
+                set t to item i of tl
+                set out to out & name of t & "\t" & artist of t & "\t" & (duration of t as string) & "\n"
+            end repeat
+            return out
+        end try
+    end if
+end tell
+return "NONE""#,
+        APP_NAME, safe
+    );
+
+    match run_applescript(&script) {
+        Ok(out) => {
+            if out == "NONE" || out.is_empty() {
+                return Vec::new();
+            }
+            out.lines()
+                .enumerate()
+                .filter_map(|(i, line)| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() >= 3 {
+                        Some(PlaylistTrack {
+                            name: parts[0].to_string(),
+                            artist: parts[1].to_string(),
+                            duration: parse_number(parts[2]),
+                            index: i + 1,
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 // ── AppleScript commands ───────────────────────────────────────────
 
 fn cmd_play_pause() {
@@ -522,6 +629,16 @@ fn cmd_play_playlist(name: &str) {
     let _ = run_applescript(&format!(
         r#"tell application "{}" to play playlist "{}""#,
         APP_NAME, safe
+    ));
+}
+
+fn cmd_play_track_in_playlist(playlist: &str, track_index: usize) {
+    let safe = applescript_escape(playlist);
+    let _ = run_applescript(&format!(
+        r#"tell application "{}"
+    play track {} of playlist "{}"
+end tell"#,
+        APP_NAME, track_index, safe
     ));
 }
 
@@ -792,6 +909,13 @@ fn draw_controls(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_playlist(f: &mut Frame, area: Rect, app: &mut App) {
+    match &app.browse_view {
+        BrowseView::Playlists => draw_playlist_list(f, area, app),
+        BrowseView::Tracks(_) => draw_track_list(f, area, app),
+    }
+}
+
+fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
     let st = app.state.lock().unwrap();
     let playlists = st.playlists.clone();
     let current = st.current_playlist.clone();
@@ -885,6 +1009,138 @@ fn draw_playlist(f: &mut Frame, area: Rect, app: &mut App) {
             .track_style(Style::default().fg(BORDER));
         let mut scrollbar_state =
             ScrollbarState::new(total).position(app.list_state.selected().unwrap_or(0));
+        let scroll_area = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height.saturating_sub(2),
+        };
+        f.render_stateful_widget(scrollbar, scroll_area, &mut scrollbar_state);
+    }
+}
+
+fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
+    let st = app.state.lock().unwrap();
+    let tracks = st.playlist_tracks.clone();
+    let now_playing = st.track.name.clone();
+    let now_artist = st.track.artist.clone();
+    drop(st);
+
+    let playlist_name = if let BrowseView::Tracks(ref name) = app.browse_view {
+        name.clone()
+    } else {
+        String::new()
+    };
+
+    let title = match &app.input_mode {
+        InputMode::Search => {
+            let blink = if (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                / 500)
+                % 2
+                == 0
+            {
+                "▏"
+            } else {
+                " "
+            };
+            format!(" Search: {}{} ", app.search_query, blink)
+        }
+        InputMode::Normal => format!(" {} ({}) ◂ Esc ", playlist_name, app.filtered_track_indices.len()),
+    };
+
+    let border_color = match &app.input_mode {
+        InputMode::Search => ACCENT,
+        InputMode::Normal => ACCENT,
+    };
+
+    let block = Block::default()
+        .title(Span::styled(&title, Style::default().fg(TEXT_DIM).bold()))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(border_color))
+        .style(Style::default().bg(SURFACE));
+
+    if tracks.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("  Loading tracks...", Style::default().fg(DIM)))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    if app.filtered_track_indices.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("  No matches", Style::default().fg(DIM))).block(block),
+            area,
+        );
+        return;
+    }
+
+    let max_width = area.width.saturating_sub(8) as usize;
+
+    let items: Vec<ListItem> = app
+        .filtered_track_indices
+        .iter()
+        .map(|&idx| {
+            let t = &tracks[idx];
+            let is_playing = !now_playing.is_empty()
+                && t.name == now_playing
+                && t.artist == now_artist;
+            let dur = format_time(t.duration);
+            let prefix = if is_playing { "▶ " } else { "  " };
+            let name_max = max_width.saturating_sub(dur.len() + prefix.len() + t.artist.len() + 5);
+            let name_display = if t.name.len() > name_max {
+                format!("{}…", &t.name[..name_max.saturating_sub(1)])
+            } else {
+                t.name.clone()
+            };
+
+            let style = if is_playing {
+                Style::default().fg(GREEN)
+            } else {
+                Style::default().fg(TEXT)
+            };
+            let dim_style = if is_playing {
+                Style::default().fg(GREEN)
+            } else {
+                Style::default().fg(TEXT_DIM)
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(name_display, style),
+                Span::styled("  ", Style::default()),
+                Span::styled(&t.artist, dim_style),
+                Span::styled(format!("  {}", dur), dim_style),
+            ]))
+        })
+        .collect();
+
+    let total = app.filtered_track_indices.len();
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(HIGHLIGHT_BG)
+                .fg(ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+
+    f.render_stateful_widget(list, area, &mut app.track_list_state);
+
+    if total > inner_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(ACCENT))
+            .track_style(Style::default().fg(BORDER));
+        let mut scrollbar_state =
+            ScrollbarState::new(total).position(app.track_list_state.selected().unwrap_or(0));
         let scroll_area = Rect {
             x: area.x,
             y: area.y + 1,
@@ -1103,42 +1359,98 @@ fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_search_key(app: &mut App, key: KeyEvent) {
+    let in_tracks = matches!(app.browse_view, BrowseView::Tracks(_));
+
     match key.code {
         KeyCode::Esc => {
             app.input_mode = InputMode::Normal;
             app.search_query.clear();
-            app.update_filter();
+            if in_tracks {
+                app.update_track_filter();
+            } else {
+                app.update_filter();
+            }
         }
         KeyCode::Enter => {
-            if let Some(name) = app.selected_playlist_name() {
-                app.set_status(&format!("Playing: {}", name));
-                std::thread::spawn(move || cmd_play_playlist(&name));
+            if in_tracks {
+                if let Some(track) = app.selected_track() {
+                    if let BrowseView::Tracks(ref playlist) = app.browse_view {
+                        let playlist = playlist.clone();
+                        let track_name = track.name.clone();
+                        let track_idx = track.index;
+                        app.set_status(&format!("Playing: {}", track_name));
+                        std::thread::spawn(move || {
+                            cmd_play_track_in_playlist(&playlist, track_idx);
+                        });
+                    }
+                }
+            } else if let Some(name) = app.selected_playlist_name() {
+                let name_clone = name.clone();
+                app.set_status(&format!("Loading tracks: {}", name));
+                app.browse_view = BrowseView::Tracks(name.clone());
+                app.track_list_state.select(Some(0));
+                let state = app.state.clone();
+                std::thread::spawn(move || {
+                    let tracks = fetch_playlist_tracks(&name_clone);
+                    let mut st = state.lock().unwrap();
+                    st.status = format!("{} — {} tracks", name_clone, tracks.len());
+                    st.status_time = Instant::now();
+                    st.playlist_tracks = tracks;
+                });
             }
             app.input_mode = InputMode::Normal;
             app.search_query.clear();
-            app.update_filter();
+            if in_tracks {
+                app.update_track_filter();
+            } else {
+                app.update_filter();
+            }
         }
         KeyCode::Backspace => {
             app.search_query.pop();
-            app.update_filter();
+            if in_tracks {
+                app.update_track_filter();
+            } else {
+                app.update_filter();
+            }
         }
         KeyCode::Down => {
-            let len = app.filtered_indices.len();
+            let len = active_list_len(app);
             if len > 0 {
-                let sel = app.list_state.selected().unwrap_or(0);
-                app.list_state.select(Some((sel + 1).min(len - 1)));
+                let ls = active_list_state(app);
+                let sel = ls.selected().unwrap_or(0);
+                ls.select(Some((sel + 1).min(len - 1)));
             }
         }
         KeyCode::Up => {
-            if let Some(sel) = app.list_state.selected() {
-                app.list_state.select(Some(sel.saturating_sub(1)));
+            let ls = active_list_state(app);
+            if let Some(sel) = ls.selected() {
+                ls.select(Some(sel.saturating_sub(1)));
             }
         }
         KeyCode::Char(c) => {
             app.search_query.push(c);
-            app.update_filter();
+            if in_tracks {
+                app.update_track_filter();
+            } else {
+                app.update_filter();
+            }
         }
         _ => {}
+    }
+}
+
+fn active_list_len(app: &App) -> usize {
+    match app.browse_view {
+        BrowseView::Playlists => app.filtered_indices.len(),
+        BrowseView::Tracks(_) => app.filtered_track_indices.len(),
+    }
+}
+
+fn active_list_state(app: &mut App) -> &mut ListState {
+    match app.browse_view {
+        BrowseView::Playlists => &mut app.list_state,
+        BrowseView::Tracks(_) => &mut app.track_list_state,
     }
 }
 
@@ -1149,7 +1461,15 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
     }
 
     match key.code {
-        KeyCode::Char('q') | KeyCode::Char('Q') => app.should_quit = true,
+        KeyCode::Char('q') | KeyCode::Char('Q') => {
+            if matches!(app.browse_view, BrowseView::Tracks(_)) {
+                app.browse_view = BrowseView::Playlists;
+                app.search_query.clear();
+                app.update_filter();
+            } else {
+                app.should_quit = true;
+            }
+        }
         KeyCode::Char('?') => app.show_help = !app.show_help,
         KeyCode::Char(' ') => {
             app.set_status("Toggled play/pause");
@@ -1298,42 +1618,88 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             });
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            let len = app.filtered_indices.len();
+            let len = active_list_len(app);
             if len > 0 {
-                let sel = app.list_state.selected().unwrap_or(0);
-                app.list_state.select(Some((sel + 1).min(len - 1)));
+                let ls = active_list_state(app);
+                let sel = ls.selected().unwrap_or(0);
+                ls.select(Some((sel + 1).min(len - 1)));
             }
         }
         KeyCode::Up | KeyCode::Char('k') => {
-            if let Some(sel) = app.list_state.selected() {
-                app.list_state.select(Some(sel.saturating_sub(1)));
+            let ls = active_list_state(app);
+            if let Some(sel) = ls.selected() {
+                ls.select(Some(sel.saturating_sub(1)));
             }
         }
         KeyCode::Char('g') => {
-            if !app.filtered_indices.is_empty() {
-                app.list_state.select(Some(0));
+            let len = active_list_len(app);
+            if len > 0 {
+                active_list_state(app).select(Some(0));
             }
         }
         KeyCode::Char('G') => {
-            let len = app.filtered_indices.len();
+            let len = active_list_len(app);
             if len > 0 {
-                app.list_state.select(Some(len - 1));
+                active_list_state(app).select(Some(len - 1));
             }
         }
         KeyCode::PageUp => {
-            if let Some(sel) = app.list_state.selected() {
-                app.list_state.select(Some(sel.saturating_sub(10)));
+            let ls = active_list_state(app);
+            if let Some(sel) = ls.selected() {
+                ls.select(Some(sel.saturating_sub(10)));
             }
         }
         KeyCode::PageDown => {
-            let len = app.filtered_indices.len();
+            let len = active_list_len(app);
             if len > 0 {
-                let sel = app.list_state.selected().unwrap_or(0);
-                app.list_state.select(Some((sel + 10).min(len - 1)));
+                let ls = active_list_state(app);
+                let sel = ls.selected().unwrap_or(0);
+                ls.select(Some((sel + 10).min(len - 1)));
+            }
+        }
+        KeyCode::Esc => {
+            if matches!(app.browse_view, BrowseView::Tracks(_)) {
+                app.browse_view = BrowseView::Playlists;
+                app.search_query.clear();
+                app.update_filter();
             }
         }
         KeyCode::Enter => {
-            if let Some(name) = app.selected_playlist_name() {
+            match &app.browse_view {
+                BrowseView::Playlists => {
+                    if let Some(name) = app.selected_playlist_name() {
+                        let name_clone = name.clone();
+                        app.set_status(&format!("Loading tracks: {}", name));
+                        app.browse_view = BrowseView::Tracks(name.clone());
+                        app.track_list_state.select(Some(0));
+                        app.search_query.clear();
+                        let state = app.state.clone();
+                        std::thread::spawn(move || {
+                            let tracks = fetch_playlist_tracks(&name_clone);
+                            let mut st = state.lock().unwrap();
+                            st.status = format!("{} — {} tracks", name_clone, tracks.len());
+                            st.status_time = Instant::now();
+                            st.playlist_tracks = tracks;
+                        });
+                    }
+                }
+                BrowseView::Tracks(playlist) => {
+                    if let Some(track) = app.selected_track() {
+                        let playlist = playlist.clone();
+                        let track_name = track.name.clone();
+                        let track_idx = track.index;
+                        app.set_status(&format!("Playing: {}", track_name));
+                        std::thread::spawn(move || {
+                            cmd_play_track_in_playlist(&playlist, track_idx);
+                        });
+                    }
+                }
+            }
+        }
+        KeyCode::Tab => {
+            // Tab plays the whole playlist when in track view
+            if let BrowseView::Tracks(ref playlist) = app.browse_view {
+                let name = playlist.clone();
                 app.set_status(&format!("Playing: {}", name));
                 std::thread::spawn(move || cmd_play_playlist(&name));
             }
@@ -1438,6 +1804,9 @@ async fn main() -> io::Result<()> {
 
     loop {
         app.update_filter();
+        if matches!(app.browse_view, BrowseView::Tracks(_)) {
+            app.update_track_filter();
+        }
 
         // Interpolate progress
         {
@@ -1468,18 +1837,20 @@ async fn main() -> io::Result<()> {
                     kind: MouseEventKind::ScrollDown,
                     ..
                 }) => {
-                    let len = app.filtered_indices.len();
+                    let len = active_list_len(&app);
                     if len > 0 {
-                        let sel = app.list_state.selected().unwrap_or(0);
-                        app.list_state.select(Some((sel + 3).min(len - 1)));
+                        let ls = active_list_state(&mut app);
+                        let sel = ls.selected().unwrap_or(0);
+                        ls.select(Some((sel + 3).min(len - 1)));
                     }
                 }
                 Event::Mouse(MouseEvent {
                     kind: MouseEventKind::ScrollUp,
                     ..
                 }) => {
-                    if let Some(sel) = app.list_state.selected() {
-                        app.list_state.select(Some(sel.saturating_sub(3)));
+                    let ls = active_list_state(&mut app);
+                    if let Some(sel) = ls.selected() {
+                        ls.select(Some(sel.saturating_sub(3)));
                     }
                 }
                 _ => {}
