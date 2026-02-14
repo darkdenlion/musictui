@@ -146,6 +146,45 @@ impl ThemeName {
     }
 }
 
+// ── Config ─────────────────────────────────────────────────────────
+
+fn config_path() -> std::path::PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    std::path::PathBuf::from(home)
+        .join(".config")
+        .join("musictui")
+        .join("config")
+}
+
+fn load_config_theme() -> ThemeName {
+    let path = config_path();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return ThemeName::Default,
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(val) = line.strip_prefix("theme=") {
+            return match val.trim() {
+                "Dracula" => ThemeName::Dracula,
+                "Catppuccin" => ThemeName::Catppuccin,
+                "Nord" => ThemeName::Nord,
+                "Gruvbox" => ThemeName::Gruvbox,
+                _ => ThemeName::Default,
+            };
+        }
+    }
+    ThemeName::Default
+}
+
+fn save_config_theme(theme: ThemeName) {
+    let path = config_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, format!("theme={}\n", theme.label()));
+}
+
 // ── Data ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -322,7 +361,7 @@ struct App {
 
 impl App {
     fn new(state: Arc<Mutex<AppState>>) -> Self {
-        let theme_name = ThemeName::Default;
+        let theme_name = load_config_theme();
         let mut app = Self {
             state,
             list_state: ListState::default(),
@@ -418,6 +457,7 @@ impl App {
         self.theme_name = self.theme_name.next();
         self.theme = self.theme_name.theme();
         self.set_status(&format!("Theme: {}", self.theme_name.label()));
+        save_config_theme(self.theme_name);
     }
 
     fn update_filter(&mut self) {
