@@ -893,13 +893,18 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
-    let body_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(40), Constraint::Length(32)])
-        .split(area);
+    let show_sidebar = area.width >= 72;
 
-    draw_left_panel(f, body_chunks[0], app);
-    draw_right_panel(f, body_chunks[1], app);
+    if show_sidebar {
+        let body_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(40), Constraint::Length(32)])
+            .split(area);
+        draw_left_panel(f, body_chunks[0], app);
+        draw_right_panel(f, body_chunks[1], app);
+    } else {
+        draw_left_panel(f, area, app);
+    }
 }
 
 fn draw_left_panel(f: &mut Frame, area: Rect, app: &mut App) {
