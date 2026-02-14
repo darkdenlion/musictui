@@ -1028,19 +1028,42 @@ fn draw_controls(f: &mut Frame, area: Rect, app: &App) {
     spans.push(Span::styled("   ", Style::default()));
 
     if st.volume >= 0 {
-        let vol_style = if st.volume == 0 {
-            Style::default().fg(RED)
+        let vol_icon = if st.volume == 0 {
+            "🔇"
         } else if st.volume < 30 {
-            Style::default().fg(TEXT_DIM)
+            "🔈"
         } else if st.volume < 70 {
-            Style::default().fg(TEXT)
+            "🔉"
         } else {
-            Style::default().fg(TEXT).bold()
+            "🔊"
         };
-        let vol_icon = if st.volume == 0 { "🔇" } else { "♪" };
+        let bar_width = 10;
+        let filled = (st.volume as usize * bar_width) / 100;
+        let empty = bar_width - filled;
+        let vol_color = if st.volume == 0 {
+            RED
+        } else if st.volume < 30 {
+            TEXT_DIM
+        } else if st.volume < 70 {
+            ACCENT
+        } else {
+            GREEN
+        };
         spans.push(Span::styled(
-            format!("{} {}%", vol_icon, st.volume),
-            vol_style,
+            format!("{} ", vol_icon),
+            Style::default().fg(vol_color),
+        ));
+        spans.push(Span::styled(
+            "█".repeat(filled),
+            Style::default().fg(vol_color),
+        ));
+        spans.push(Span::styled(
+            "░".repeat(empty),
+            Style::default().fg(DIM),
+        ));
+        spans.push(Span::styled(
+            format!(" {}%", st.volume),
+            Style::default().fg(TEXT_DIM),
         ));
     }
 
