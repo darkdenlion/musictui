@@ -12,7 +12,7 @@ from typing import List, Optional, Tuple
 APP_NAME = "Music"
 POLL_INTERVAL = 2.0
 APPLESCRIPT_TIMEOUT = 5.0
-HEADER_DIVIDER_ROWS = 2
+STATUS_CLEAR_SECONDS = 5.0
 
 
 def init_locale() -> None:
@@ -27,16 +27,7 @@ def init_locale() -> None:
 init_locale()
 
 TERM_NAME = os.environ.get("TERM", "").lower()
-USE_ASCII_BOX = os.environ.get("MUSICTUI_ASCII", "") == "1" or "ghostty" in TERM_NAME
-USE_ASCII_PROGRESS = os.environ.get("MUSICTUI_PROGRESS_ASCII", "") == "1"
-
-
-def box_chars() -> dict:
-    if USE_ASCII_BOX:
-        return {"tl": "+", "tr": "+", "bl": "+", "br": "+", "h": "=", "v": "|"}
-    return {"tl": "╔", "tr": "╗", "bl": "╚", "br": "╝", "h": "═", "v": "║"}
-
-locale.setlocale(locale.LC_ALL, "")
+USE_ASCII = os.environ.get("MUSICTUI_ASCII", "") == "1" or "ghostty" in TERM_NAME
 
 
 @dataclass
@@ -65,13 +56,29 @@ class AppState:
     up_next: UpNextInfo = field(default_factory=UpNextInfo)
     up_next_source: str = "playlist"
     status: str = ""
+    status_set_time: float = 0.0
     last_poll: float = 0.0
     last_position_time: float = 0.0
     shuffle_enabled: Optional[bool] = None
+    volume: int = -1
+    repeat_mode: Optional[str] = None
+    current_playlist_name: str = ""
+    search_query: str = ""
+    search_active: bool = False
+    show_help: bool = False
     controls: dict = field(default_factory=dict)
+    playlist_box_info: Tuple[int, int, int, int] = (0, 0, 0, 0)
     lock: threading.Lock = field(default_factory=threading.Lock)
     stop_event: threading.Event = field(default_factory=threading.Event)
     playlists_loaded: bool = False
+
+
+# ── AppleScript helpers ──────────────────────────────────────────────
+
+
+def set_status(state, msg: str) -> None:
+    state.status = msg
+    state.status_set_time = time.time()
 
 
 def run_applescript(script: str, timeout: float = APPLESCRIPT_TIMEOUT) -> Tuple[str, str, int]:
@@ -141,15 +148,15 @@ def dump_music_ui(state: AppState) -> None:
     '''
     out, err, code = run_applescript(script)
     if err or code != 0 or out.startswith("ERR:"):
-        state.status = "Failed to dump UI. Ensure Accessibility is enabled."
+        set_status(state, "Failed to dump UI. Ensure Accessibility is enabled.")
         return
     path = "/tmp/musictui_upnext.txt"
     try:
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(out)
-        state.status = f"UI dump saved: {path}"
+        set_status(state, f"UI dump saved: {path}")
     except OSError:
-        state.status = "Failed to write UI dump."
+        set_status(state, "Failed to write UI dump.")
 
 
 def applescript_escape(value: str) -> str:
@@ -183,6 +190,9 @@ def parse_applescript_number(raw: str) -> float:
         return 0.0
 
 
+# ── Fetchers ─────────────────────────────────────────────────────────
+
+
 def fetch_now_playing(state: AppState) -> None:
     script = f'''
     tell application "{APP_NAME}"
@@ -205,10 +215,10 @@ def fetch_now_playing(state: AppState) -> None:
     out, err, code = run_applescript(script)
     err_msg = format_error(err)
     if err_msg:
-        state.status = err_msg
+        set_status(state, err_msg)
         return
     if code != 0:
-        state.status = "AppleScript failed."
+        set_status(state, "AppleScript failed.")
         return
     if out in ("STOPPED", "NOT_RUNNING", ""):
         state.now_playing = TrackInfo(state=out or "UNKNOWN")
@@ -346,59 +356,62 @@ def fetch_playlists(state: AppState) -> None:
     out, err, code = run_applescript(script)
     err_msg = format_error(err)
     if err_msg:
-        state.status = err_msg
+        set_status(state, err_msg)
         return
     if code != 0:
-        state.status = "AppleScript failed."
+        set_status(state, "AppleScript failed.")
         return
     if out in ("NOT_RUNNING", ""):
         state.playlists = []
         state.selected_index = 0
-        state.status = "Music app is not running."
+        set_status(state, "Music app is not running.")
         return
     playlists = [p.strip() for p in out.split("\n") if p.strip()]
     state.playlists = playlists
     if state.selected_index >= len(playlists):
         state.selected_index = max(0, len(playlists) - 1)
-    state.status = f"Loaded {len(playlists)} playlists."
+    set_status(state, f"Loaded {len(playlists)} playlists.")
+
+
+# ── Actions ──────────────────────────────────────────────────────────
 
 
 def play_pause(state: AppState) -> None:
-    out, err, code = run_applescript(f'tell application "{APP_NAME}" to playpause')
+    _, err, code = run_applescript(f'tell application "{APP_NAME}" to playpause')
     err_msg = format_error(err)
     if err_msg:
-        state.status = err_msg
+        set_status(state, err_msg)
     elif code != 0:
-        state.status = "AppleScript failed."
+        set_status(state, "AppleScript failed.")
     else:
-        state.status = "Toggled play/pause."
+        set_status(state, "Toggled play/pause.")
 
 
 def next_track(state: AppState) -> None:
-    out, err, code = run_applescript(f'tell application "{APP_NAME}" to next track')
+    _, err, code = run_applescript(f'tell application "{APP_NAME}" to next track')
     err_msg = format_error(err)
     if err_msg:
-        state.status = err_msg
+        set_status(state, err_msg)
     elif code != 0:
-        state.status = "AppleScript failed."
+        set_status(state, "AppleScript failed.")
     else:
-        state.status = "Next track."
+        set_status(state, "Next track.")
 
 
 def previous_track(state: AppState) -> None:
-    out, err, code = run_applescript(f'tell application "{APP_NAME}" to previous track')
+    _, err, code = run_applescript(f'tell application "{APP_NAME}" to previous track')
     err_msg = format_error(err)
     if err_msg:
-        state.status = err_msg
+        set_status(state, err_msg)
     elif code != 0:
-        state.status = "AppleScript failed."
+        set_status(state, "AppleScript failed.")
     else:
-        state.status = "Previous track."
+        set_status(state, "Previous track.")
 
 
 def play_selected_playlist(state: AppState) -> None:
     if not state.playlists:
-        state.status = "No playlists found."
+        set_status(state, "No playlists found.")
         return
     name = applescript_escape(state.playlists[state.selected_index])
     script = f'''
@@ -406,14 +419,14 @@ def play_selected_playlist(state: AppState) -> None:
         play playlist "{name}"
     end tell
     '''
-    out, err, code = run_applescript(script)
+    _, err, code = run_applescript(script)
     err_msg = format_error(err)
     if err_msg:
-        state.status = err_msg
+        set_status(state, err_msg)
     elif code != 0:
-        state.status = "AppleScript failed."
+        set_status(state, "AppleScript failed.")
     else:
-        state.status = f"Playing playlist: {name}"
+        set_status(state, f"Playing playlist: {name}")
 
 
 def toggle_shuffle(state: AppState) -> None:
@@ -439,17 +452,17 @@ def toggle_shuffle(state: AppState) -> None:
     out, err, code = run_applescript(script)
     err_msg = format_error(err)
     if err_msg:
-        state.status = err_msg
+        set_status(state, err_msg)
     elif code != 0:
-        state.status = "AppleScript failed."
+        set_status(state, "AppleScript failed.")
     elif out.startswith("ERR:"):
-        state.status = "Shuffle failed."
+        set_status(state, "Shuffle failed.")
     elif out == "true":
-        state.status = "Shuffle on."
+        set_status(state, "Shuffle on.")
     elif out == "false":
-        state.status = "Shuffle off."
+        set_status(state, "Shuffle off.")
     else:
-        state.status = "Toggled shuffle."
+        set_status(state, "Toggled shuffle.")
     fetch_shuffle_state(state)
 
 
@@ -484,17 +497,181 @@ def fetch_shuffle_state(state: AppState) -> None:
         state.shuffle_enabled = None
 
 
+def fetch_volume(state: AppState) -> None:
+    script = f'''
+    tell application "{APP_NAME}"
+        if it is running then
+            return sound volume as string
+        end if
+    end tell
+    return "-1"
+    '''
+    out, err, code = run_applescript(script)
+    if err or code != 0:
+        return
+    try:
+        state.volume = int(parse_applescript_number(out))
+    except (ValueError, TypeError):
+        pass
+
+
+def set_volume(state: AppState, delta: int) -> None:
+    if state.volume < 0:
+        fetch_volume(state)
+    new_vol = max(0, min(100, state.volume + delta))
+    script = f'tell application "{APP_NAME}" to set sound volume to {new_vol}'
+    _, err, code = run_applescript(script)
+    if err or code != 0:
+        set_status(state, "Volume change failed.")
+    else:
+        state.volume = new_vol
+        set_status(state, f"Volume: {new_vol}%")
+
+
+def toggle_mute(state: AppState) -> None:
+    if state.volume < 0:
+        fetch_volume(state)
+    if state.volume > 0:
+        state._pre_mute_volume = state.volume
+        new_vol = 0
+    else:
+        new_vol = getattr(state, "_pre_mute_volume", 50)
+    script = f'tell application "{APP_NAME}" to set sound volume to {new_vol}'
+    _, err, code = run_applescript(script)
+    if err or code != 0:
+        set_status(state, "Mute toggle failed.")
+    else:
+        state.volume = new_vol
+        set_status(state, "Muted." if new_vol == 0 else f"Unmuted ({new_vol}%).")
+
+
+def seek_track(state: AppState, delta: float) -> None:
+    info = state.now_playing
+    if info.state not in ("PLAYING", "PAUSED"):
+        set_status(state, "Nothing to seek.")
+        return
+    new_pos = max(0.0, min(info.duration, info.position + delta))
+    script = f'tell application "{APP_NAME}" to set player position to {new_pos}'
+    _, err, code = run_applescript(script)
+    if err or code != 0:
+        set_status(state, "Seek failed.")
+    else:
+        state.now_playing.position = new_pos
+        state.last_position_time = time.time()
+        direction = "forward" if delta > 0 else "back"
+        set_status(state, f"Seek {direction} {abs(int(delta))}s.")
+
+
+def fetch_repeat_mode(state: AppState) -> None:
+    script = f'''
+    tell application "{APP_NAME}"
+        if it is running then
+            try
+                return song repeat as string
+            on error
+                return "UNKNOWN"
+            end try
+        end if
+    end tell
+    return "UNKNOWN"
+    '''
+    out, err, code = run_applescript(script)
+    if err or code != 0:
+        state.repeat_mode = None
+        return
+    out_lower = out.strip().lower()
+    if out_lower in ("off", "none"):
+        state.repeat_mode = "off"
+    elif out_lower in ("one",):
+        state.repeat_mode = "one"
+    elif out_lower in ("all",):
+        state.repeat_mode = "all"
+    else:
+        state.repeat_mode = None
+
+
+def toggle_repeat(state: AppState) -> None:
+    cycle = {"off": "all", "all": "one", "one": "off"}
+    current = state.repeat_mode or "off"
+    next_mode = cycle.get(current, "off")
+    as_val = {"off": "off", "one": "one", "all": "all"}[next_mode]
+    script = f'tell application "{APP_NAME}" to set song repeat to {as_val}'
+    _, err, code = run_applescript(script)
+    if err or code != 0:
+        set_status(state, "Repeat toggle failed.")
+    else:
+        state.repeat_mode = next_mode
+        set_status(state, f"Repeat: {next_mode}.")
+
+
+def fetch_current_playlist_name(state: AppState) -> None:
+    script = f'''
+    tell application "{APP_NAME}"
+        if it is running then
+            if player state is not stopped then
+                try
+                    return name of current playlist
+                on error
+                    return ""
+                end try
+            end if
+        end if
+    end tell
+    return ""
+    '''
+    out, err, code = run_applescript(script)
+    if err or code != 0:
+        state.current_playlist_name = ""
+        return
+    state.current_playlist_name = out.strip()
+
+
+def play_track(state: AppState) -> None:
+    _, err, code = run_applescript(f'tell application "{APP_NAME}" to play')
+    err_msg = format_error(err)
+    if err_msg:
+        set_status(state, err_msg)
+    elif code != 0:
+        set_status(state, "AppleScript failed.")
+    else:
+        set_status(state, "Play.")
+
+
+def pause_track(state: AppState) -> None:
+    _, err, code = run_applescript(f'tell application "{APP_NAME}" to pause')
+    err_msg = format_error(err)
+    if err_msg:
+        set_status(state, err_msg)
+    elif code != 0:
+        set_status(state, "AppleScript failed.")
+    else:
+        set_status(state, "Pause.")
+
+
+def stop_track(state: AppState) -> None:
+    _, err, code = run_applescript(f'tell application "{APP_NAME}" to stop')
+    err_msg = format_error(err)
+    if err_msg:
+        set_status(state, err_msg)
+    elif code != 0:
+        set_status(state, "AppleScript failed.")
+    else:
+        set_status(state, "Stop.")
+
+
 def background_poll(state: AppState) -> None:
-    """Background thread that polls Music app without blocking the UI."""
     fetch_playlists(state)
     with state.lock:
         state.playlists_loaded = True
     fetch_now_playing(state)
     fetch_up_next(state)
     fetch_shuffle_state(state)
+    fetch_volume(state)
+    fetch_repeat_mode(state)
+    fetch_current_playlist_name(state)
 
     poll_count = 0
-    playlist_refresh_interval = 15  # Refresh playlists every ~30 seconds
+    playlist_refresh_interval = 15
 
     while not state.stop_event.is_set():
         state.stop_event.wait(POLL_INTERVAL)
@@ -504,405 +681,637 @@ def background_poll(state: AppState) -> None:
         fetch_now_playing(state)
         fetch_up_next(state)
         fetch_shuffle_state(state)
+        fetch_volume(state)
+        fetch_repeat_mode(state)
+        fetch_current_playlist_name(state)
         if poll_count >= playlist_refresh_interval:
             fetch_playlists(state)
             poll_count = 0
 
 
-def draw_header(stdscr, width, state: AppState, colors) -> None:
-    if width <= 0:
-        return
-    header = "  Apple Music TUI  "
-    status = state.now_playing.state or "UNKNOWN"
-    badge = f" {status} "
-    stdscr.attron(curses.color_pair(colors["header"]))
-    if width == 1:
-        stdscr.addstr(0, 0, " ")
-    else:
-        stdscr.addstr(0, 0, " " * (width - 1))
-        stdscr.addstr(0, 1, header[: max(0, width - 2)])
-    if width > 1 and width - len(badge) - 3 > 0:
-        stdscr.attron(curses.color_pair(colors["accent"]))
-        stdscr.addstr(0, width - len(badge) - 3, "●")
-        stdscr.attroff(curses.color_pair(colors["accent"]))
-        stdscr.addstr(0, width - len(badge) - 2, badge)
-    stdscr.attroff(curses.color_pair(colors["header"]))
+# ── Format helpers ───────────────────────────────────────────────────
 
 
-def draw_header_divider(stdscr, width, colors) -> None:
-    if width <= 0:
-        return
-    stdscr.attron(curses.color_pair(colors["border"]))
-    line_w = max(1, width - 1)
-    for row in range(HEADER_DIVIDER_ROWS):
-        stdscr.addstr(1 + row, 0, ("=" if USE_ASCII_BOX else "═") * line_w)
-    stdscr.attroff(curses.color_pair(colors["border"]))
+def format_time(seconds: float) -> str:
+    if seconds <= 0:
+        return "--:--"
+    total = int(seconds)
+    minutes = total // 60
+    secs = total % 60
+    return f"{minutes}:{secs:02d}"
 
 
-def draw_box(stdscr, y, x, h, w, title, colors) -> None:
-    if h < 3 or w < 4:
-        return
-    chars = box_chars()
-    stdscr.attron(curses.color_pair(colors["border"]))
-    if title and w > 6:
-        label = f" {title} "
-        available = w - 2
-        trimmed = label[:available]
-        left = max(1, (available - len(trimmed)) // 2)
-        right = available - len(trimmed) - left
-        top = chars["tl"] + (chars["h"] * left) + trimmed + (chars["h"] * right) + chars["tr"]
-        stdscr.addstr(y, x, top[:w])
-    else:
-        stdscr.addstr(y, x, chars["tl"] + chars["h"] * (w - 2) + chars["tr"])
-    for row in range(1, h - 1):
-        stdscr.addstr(y + row, x, chars["v"])
-        stdscr.addstr(y + row, x + w - 1, chars["v"])
-    stdscr.addstr(y + h - 1, x, chars["bl"] + chars["h"] * (w - 2) + chars["br"])
-    stdscr.attroff(curses.color_pair(colors["border"]))
-    if title and w > 6:
-        label = f" {title} "
-        available = w - 2
-        trimmed = label[:available]
-        start_x = x + 1 + max(0, (available - len(trimmed)) // 2)
-        stdscr.attron(curses.color_pair(colors["accent"]))
-        stdscr.addstr(y, start_x, trimmed)
-        stdscr.attroff(curses.color_pair(colors["accent"]))
+# ── Color system ─────────────────────────────────────────────────────
+
+C_HEADER = 1
+C_DIM = 2
+C_SELECTED_PLAY = 3
+C_SELECTED_PAUSE = 4
+C_SELECTED_STOP = 5
+C_ACCENT_PLAY = 6
+C_ACCENT_PAUSE = 7
+C_ACCENT_STOP = 8
+C_STATUS = 9
+C_MUTED = 10
+C_BRIGHT = 11
+C_PROGRESS = 12
+C_ART = 13
+
+# Equalizer animation frames (6 frames, cycle at ~4Hz)
+EQ_FRAMES = [
+    "▁▃▅▇▅▃",
+    "▃▅▇▅▃▁",
+    "▅▇▅▃▁▃",
+    "▇▅▃▁▃▅",
+    "▅▃▁▃▅▇",
+    "▃▁▃▅▇▅",
+]
+
+# Box-drawing characters (panel borders)
+if USE_ASCII:
+    BOX_TL, BOX_TR, BOX_BL, BOX_BR = "+", "+", "+", "+"
+    BOX_H, BOX_V = "-", "|"
+    PROG_FILLED, PROG_HEAD, PROG_EMPTY = "=", "O", "-"
+else:
+    BOX_TL, BOX_TR, BOX_BL, BOX_BR = "\u256d", "\u256e", "\u2570", "\u256f"
+    BOX_H, BOX_V = "\u2500", "\u2502"
+    PROG_FILLED, PROG_HEAD, PROG_EMPTY = "\u2501", "\u25cf", "\u254c"
 
 
-def draw_now_playing(stdscr, y, x, h, w, state: AppState, colors) -> None:
-    draw_box(stdscr, y, x, h, w, "Now Playing", colors)
-    if h < 7 or w < 12:
-        return
-    content_y = y + 1
-    content_x = x + 2
-    max_text_w = w - 4
-    info = state.now_playing
-    if info.state == "NOT_RUNNING":
-        stdscr.addstr(content_y, content_x, "Music app is not running."[:max_text_w])
-        return
-    if info.state in ("STOPPED", "UNKNOWN", ""):
-        stdscr.addstr(content_y, content_x, "Nothing playing."[:max_text_w])
-        return
-    label_w = 8
-    value_w = max(0, max_text_w - label_w - 1)
-    line = content_y
-    shuffle_text = "ON" if state.shuffle_enabled else "OFF"
-    if state.shuffle_enabled is None:
-        shuffle_text = "UNKNOWN"
-    state_value = f"{info.state} | SHUFFLE {shuffle_text}"
-    rows = [
-        ("TITLE", info.name or "Untitled"),
-        ("ARTIST", info.artist or "Unknown"),
-        ("ALBUM", info.album or "Unknown"),
-        ("STATE", state_value),
-    ]
-    for label, value in rows:
-        if line >= y + h - 2:
-            break
-        stdscr.attron(curses.A_DIM)
-        stdscr.addstr(line, content_x, f"{label:<{label_w}}"[:label_w])
-        stdscr.attroff(curses.A_DIM)
-        stdscr.addstr(line, content_x + label_w + 1, value[:value_w])
-        line += 1
-    if line < y + h - 1:
-        time_text = f"{format_time(info.position)} / {format_time(info.duration)}"
-        stdscr.attron(curses.A_DIM)
-        stdscr.addstr(line, content_x, f"{'TIME':<{label_w}}"[:label_w])
-        stdscr.attroff(curses.A_DIM)
-        stdscr.addstr(line, content_x + label_w + 1, time_text[:value_w])
-        line += 1
-    if line < y + h - 1:
-        progress_line = format_progress_line(max_text_w, info.position, info.duration)
-        stdscr.attron(curses.color_pair(colors["accent"]))
-        stdscr.addstr(line, content_x, progress_line[:max_text_w])
-        stdscr.attroff(curses.color_pair(colors["accent"]))
-
-
-def draw_controls_panel(stdscr, y, x, h, w, state: AppState, colors) -> None:
-    draw_box(stdscr, y, x, h, w, "Controls", colors)
-    if h < 5 or w < 20:
-        return
-    controls = [
-        ("Prev", "⟲ p"),
-        ("Play", "▶ o"),
-        ("Pause", "Ⅱ a"),
-        ("Stop", "■ s"),
-        ("Next", "n ⟳"),
-        ("Shuffle", "⇆ x"),
-    ]
-    content_y = y + 1
-    content_x = x + 2
-    max_text_w = w - 4
-    stdscr.attron(curses.A_BOLD)
-    cursor_x = content_x
-    state.controls = {}
-    for name, label in controls:
-        text = f"[{label}]"
-        if cursor_x + len(text) < x + w - 1:
-            stdscr.addstr(content_y, cursor_x, text[:max_text_w])
-            state.controls[name] = (content_y, cursor_x, len(text))
-        cursor_x += len(text) + 1
-    stdscr.attroff(curses.A_BOLD)
-    hint = "space: toggle   x: shuffle   r: refresh"
-    if content_y + 1 < y + h - 1:
-        stdscr.addstr(content_y + 1, content_x, hint[:max_text_w])
-
-
-def draw_shortcuts_panel(stdscr, y, x, h, w, colors) -> None:
-    draw_box(stdscr, y, x, h, w, "Shortcuts", colors)
-    if h < 5 or w < 20:
-        return
-    lines = [
-        "j/k: move   Enter: play",
-        "n/p: next/prev",
-        "o/a/s: play/pause/stop",
-        "x: shuffle",
-        "u: dump UI",
-        "q: quit",
-    ]
-    content_y = y + 1
-    content_x = x + 2
-    max_text_w = w - 4
-    for idx, line in enumerate(lines):
-        row = content_y + idx
-        if row >= y + h - 1:
-            break
-        stdscr.addstr(row, content_x, line[:max_text_w])
-
-
-def draw_stats_panel(stdscr, y, x, h, w, state: AppState, colors) -> None:
-    draw_box(stdscr, y, x, h, w, "Session", colors)
-    if h < 5 or w < 20:
-        return
-    info = state.now_playing
-    ratio = 0.0
-    if info.duration > 0:
-        ratio = max(0.0, min(1.0, info.position / info.duration))
-    spark_width = max(8, min(12, w - 6))
-    if USE_ASCII_PROGRESS:
-        spark = ("#" * int(ratio * spark_width)).ljust(spark_width, "-")
-    else:
-        blocks = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
-        level = int(ratio * (len(blocks) - 1))
-        spark = (blocks[level] * spark_width)[:spark_width]
-    lines = [
-        f"Playlists: {len(state.playlists)}",
-        f"Poll: {POLL_INTERVAL:.1f}s",
-        f"Position: {format_time(info.position)}",
-        f"Duration: {format_time(info.duration)}",
-        f"Progress: {spark}",
-    ]
-    content_y = y + 1
-    content_x = x + 2
-    max_text_w = w - 4
-    for idx, line in enumerate(lines):
-        row = content_y + idx
-        if row >= y + h - 1:
-            break
-        stdscr.addstr(row, content_x, line[:max_text_w])
-
-
-def draw_queue_panel(stdscr, y, x, h, w, state: AppState, colors) -> None:
-    draw_box(stdscr, y, x, h, w, "Up Next", colors)
-    if h < 4 or w < 20:
-        return
-    content_y = y + 1
-    content_x = x + 2
-    max_text_w = w - 4
-    info = state.up_next
-    if info.status == "OK":
-        lines = [
-            info.name or "Untitled",
-            info.artist or "Unknown Artist",
-            info.album or "Unknown Album",
-        ]
-    elif info.status == "END":
-        lines = ["End of playlist"]
-    elif info.status == "STOPPED":
-        lines = ["Nothing playing"]
-    elif info.status == "NOT_RUNNING":
-        lines = ["Music app not running"]
-    else:
-        lines = ["Up Next unavailable"]
-    for idx, line in enumerate(lines):
-        row = content_y + idx
-        if row >= y + h - 1:
-            break
-        stdscr.addstr(row, content_x, line[:max_text_w])
-    if content_y + len(lines) < y + h - 1:
-        source = "Up Next: UI" if state.up_next_source == "ui" else "Up Next: Playlist"
-        stdscr.attron(curses.A_DIM)
-        stdscr.addstr(content_y + len(lines), content_x, source[:max_text_w])
-        stdscr.attroff(curses.A_DIM)
-
-
-def draw_playlists(stdscr, y, x, h, w, state: AppState, colors) -> None:
-    title = f"Playlists ({len(state.playlists)})"
-    draw_box(stdscr, y, x, h, w, title, colors)
-    if h < 5 or w < 10:
-        return
-    content_y = y + 1
-    content_x = x + 2
-    max_rows = h - 2
-    max_text_w = w - 4
-
-    if not state.playlists:
-        msg = "Loading..." if not state.playlists_loaded else "No playlists found."
-        stdscr.addstr(content_y, content_x, msg[:max_text_w])
-        return
-
-    start = max(0, state.selected_index - max_rows + 1)
-    visible = state.playlists[start : start + max_rows]
-    for idx, name in enumerate(visible):
-        row = content_y + idx
-        if row >= y + h - 1:
-            break
-        if start + idx == state.selected_index:
-            stdscr.attron(curses.color_pair(colors["selected"]))
-            stdscr.attron(curses.A_BOLD)
-            prefix = "▶ "
-            stdscr.addstr(row, content_x, (prefix + name)[:max_text_w])
-            glow = "▌" if not USE_ASCII_BOX else "|"
-            stdscr.attron(curses.color_pair(colors["accent"]))
-            stdscr.addstr(row, x + 1, glow)
-            stdscr.attroff(curses.color_pair(colors["accent"]))
-            stdscr.attroff(curses.A_BOLD)
-            stdscr.attroff(curses.color_pair(colors["selected"]))
-        else:
-            if idx % 2 == 1:
-                stdscr.attron(curses.A_DIM)
-            stdscr.addstr(row, content_x, ("  " + name)[:max_text_w])
-            if idx % 2 == 1:
-                stdscr.attroff(curses.A_DIM)
-    if len(state.playlists) > max_rows and w > 8:
-        track_x = x + w - 2
-        track_h = max_rows
-        thumb_h = max(1, int(track_h * max_rows / len(state.playlists)))
-        span = max(1, len(state.playlists) - max_rows)
-        thumb_y = int((track_h - thumb_h) * start / span)
-        for i in range(track_h):
-            char = "█" if thumb_y <= i < thumb_y + thumb_h else "│"
-            stdscr.addstr(content_y + i, track_x, char)
-
-
-def draw_status(stdscr, y, width, state: AppState, colors) -> None:
-    if y < 0 or width <= 0:
-        return
-    status = state.status or "Ready."
-    stdscr.attron(curses.color_pair(colors["status"]))
-    if width == 1:
-        stdscr.addstr(y, 0, " ")
-    else:
-        stdscr.addstr(y, 0, " " * (width - 1))
-        stdscr.addstr(y, 1, status[: max(0, width - 2)])
-    stdscr.attroff(curses.color_pair(colors["status"]))
-
-
-def init_colors() -> dict:
+def init_colors() -> None:
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_BLUE, -1)
-    curses.init_pair(2, curses.COLOR_WHITE, -1)
-    curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_BLUE)
-    curses.init_pair(4, curses.COLOR_BLUE, -1)
-    curses.init_pair(5, curses.COLOR_BLUE, -1)
-    curses.init_pair(6, curses.COLOR_BLUE, -1)
+    curses.init_pair(C_HEADER, curses.COLOR_BLACK, curses.COLOR_BLUE)
+    curses.init_pair(C_DIM, curses.COLOR_WHITE, -1)
+    curses.init_pair(C_SELECTED_PLAY, curses.COLOR_WHITE, curses.COLOR_BLUE)
+    curses.init_pair(C_SELECTED_PAUSE, curses.COLOR_WHITE, curses.COLOR_MAGENTA)
+    curses.init_pair(C_SELECTED_STOP, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(C_ACCENT_PLAY, curses.COLOR_BLUE, -1)
+    curses.init_pair(C_ACCENT_PAUSE, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(C_ACCENT_STOP, curses.COLOR_WHITE, -1)
+    curses.init_pair(C_STATUS, curses.COLOR_BLACK, curses.COLOR_WHITE)
+    curses.init_pair(C_MUTED, curses.COLOR_WHITE, -1)
+    curses.init_pair(C_BRIGHT, curses.COLOR_WHITE, -1)
+    curses.init_pair(C_PROGRESS, curses.COLOR_CYAN, -1)
+    curses.init_pair(C_ART, curses.COLOR_BLUE, -1)
 
-    return {
-        "header": 1,
-        "border": 4,
-        "selected": 3,
-        "status": 5,
-        "accent": 6,
-    }
+
+def accent_pair(state: AppState) -> int:
+    ps = state.now_playing.state.upper() if state.now_playing.state else ""
+    if ps == "PLAYING":
+        return C_ACCENT_PLAY
+    if ps == "PAUSED":
+        return C_ACCENT_PAUSE
+    return C_ACCENT_STOP
 
 
-def draw_ui(stdscr, state: AppState, colors) -> None:
+def selected_pair(state: AppState) -> int:
+    ps = state.now_playing.state.upper() if state.now_playing.state else ""
+    if ps == "PLAYING":
+        return C_SELECTED_PLAY
+    if ps == "PAUSED":
+        return C_SELECTED_PAUSE
+    return C_SELECTED_STOP
+
+
+# ── Safe addstr (avoids curses crash at bottom-right corner) ─────────
+
+
+def safe_addstr(stdscr, y, x, text, attr=0):
+    h, w = stdscr.getmaxyx()
+    if y < 0 or y >= h or x >= w:
+        return
+    max_len = w - x
+    if max_len <= 0:
+        return
+    truncated = text[:max_len]
+    # Last cell of terminal: addstr would advance cursor past end
+    if y == h - 1 and x + len(truncated) >= w:
+        truncated = truncated[: max_len - 1]
+    if truncated:
+        try:
+            stdscr.addstr(y, x, truncated, attr)
+        except curses.error:
+            pass
+
+
+def draw_panel_border(stdscr, y, x, h, w, title="", attr=0):
+    if h < 2 or w < 4:
+        return
+    dim = curses.color_pair(C_DIM) | curses.A_DIM
+    # Top border: ╭─ Title ────╮
+    if title:
+        top_line = BOX_TL + BOX_H + " " + title + " " + BOX_H * max(0, w - len(title) - 5) + BOX_TR
+    else:
+        top_line = BOX_TL + BOX_H * (w - 2) + BOX_TR
+    safe_addstr(stdscr, y, x, top_line[:w], dim)
+    if title:
+        safe_addstr(stdscr, y, x + 3, title, attr | curses.A_BOLD)
+    # Side borders
+    for row in range(1, h - 1):
+        safe_addstr(stdscr, y + row, x, BOX_V, dim)
+        safe_addstr(stdscr, y + row, x + w - 1, BOX_V, dim)
+    # Bottom border: ╰───────────╯
+    bot_line = BOX_BL + BOX_H * (w - 2) + BOX_BR
+    safe_addstr(stdscr, y + h - 1, x, bot_line[:w], dim)
+
+
+# ── Drawing ──────────────────────────────────────────────────────────
+
+
+def draw_header(stdscr, width, state: AppState) -> None:
+    if width <= 0:
+        return
+    ps = state.now_playing.state.upper() if state.now_playing.state else "UNKNOWN"
+    bar_attr = curses.color_pair(C_HEADER) | curses.A_BOLD
+    safe_addstr(stdscr, 0, 0, " " * (width - 1), bar_attr)
+
+    left = " Apple Music" if USE_ASCII else " ♫ Apple Music"
+    safe_addstr(stdscr, 0, 0, left, bar_attr)
+
+    if USE_ASCII:
+        if ps == "PLAYING":
+            indicator = ">>> playing"
+        elif ps == "PAUSED":
+            indicator = "|| paused"
+        else:
+            indicator = ". stopped"
+    else:
+        if ps == "PLAYING":
+            frame_idx = int(time.time() * 4) % len(EQ_FRAMES)
+            eq = EQ_FRAMES[frame_idx]
+            indicator = f"{eq} playing"
+        elif ps == "PAUSED":
+            indicator = ("◐" if int(time.time()) % 2 == 0 else "◑") + " paused"
+        else:
+            indicator = "○ stopped"
+    right = f" {indicator} "
+    if width > len(right) + len(left) + 1:
+        safe_addstr(stdscr, 0, width - len(right) - 1, right, bar_attr)
+
+
+def draw_now_playing(stdscr, y, x, h, w, state: AppState) -> None:
+    if h < 3 or w < 10:
+        return
+    info = state.now_playing
+    acc = curses.color_pair(accent_pair(state))
+    acc_bold = acc | curses.A_BOLD
+    dim = curses.color_pair(C_DIM) | curses.A_DIM
+    bright = curses.color_pair(C_BRIGHT) | curses.A_BOLD
+
+    text_x = x + 1
+    tw = w - 2
+
+    if info.state in ("NOT_RUNNING", "STOPPED", "UNKNOWN", ""):
+        msg = "Music app not running." if info.state == "NOT_RUNNING" else "Nothing playing."
+        safe_addstr(stdscr, y + 1, text_x, msg, dim)
+        return
+
+    line = y
+
+    # Row 0: Track title (bold white)
+    safe_addstr(stdscr, line, text_x, (info.name or "Untitled")[:tw], bright)
+    line += 1
+
+    # Row 1: Artist · Album (dimmed)
+    if line < y + h:
+        artist = info.artist or "Unknown"
+        album = info.album or "Unknown"
+        sep = "  -  " if USE_ASCII else "  \u00b7  "
+        safe_addstr(stdscr, line, text_x, f"{artist}{sep}{album}"[:tw], dim)
+        line += 1
+
+    # Row 2: blank
+    line += 1
+
+    # Row 3: ● Playing   ⇆ On   ↻ All   ♪ 72%
+    if line < y + h:
+        ps = info.state.upper()
+        if USE_ASCII:
+            sd = {"PLAYING": ">", "PAUSED": "||"}.get(ps, ".")
+            si, ri, vi = "~", "R", "#"
+        else:
+            sd = {"PLAYING": "\u25cf", "PAUSED": "\u23f8"}.get(ps, "\u25cb")
+            si, ri, vi = "\u21c6", "\u21bb", "\u266a"
+        shuf = "On" if state.shuffle_enabled else "Off"
+        if state.shuffle_enabled is None:
+            shuf = "-"
+        rpt = (state.repeat_mode or "-").capitalize()
+        vol_str = f"   {vi} {state.volume}%" if state.volume >= 0 else ""
+        chips = f"{sd} {ps.capitalize()}   {si} {shuf}   {ri} {rpt}{vol_str}"
+        safe_addstr(stdscr, line, text_x, chips[:tw], acc)
+        line += 1
+
+    # Row 4: blank
+    line += 1
+
+    # Row 5: full-width progress bar
+    prog_y = y + h - 1
+    if prog_y >= line:
+        time_l = format_time(info.position)
+        time_r = format_time(info.duration)
+        bar_w = tw - len(time_l) - len(time_r) - 2
+        if bar_w >= 8:
+            safe_addstr(stdscr, prog_y, text_x, time_l, dim)
+            bar_x = text_x + len(time_l) + 1
+            if info.duration > 0:
+                ratio = max(0.0, min(1.0, info.position / info.duration))
+            else:
+                ratio = 0.0
+            filled = int(ratio * bar_w)
+            filled_str = PROG_FILLED * filled
+            dot_str = PROG_HEAD if filled < bar_w else ""
+            empty_str = PROG_EMPTY * max(0, bar_w - filled - 1)
+            safe_addstr(stdscr, prog_y, bar_x, filled_str, acc_bold)
+            safe_addstr(stdscr, prog_y, bar_x + filled, dot_str, bright)
+            safe_addstr(stdscr, prog_y, bar_x + filled + len(dot_str), empty_str, dim)
+            time_r_x = bar_x + bar_w + 1
+            safe_addstr(stdscr, prog_y, time_r_x, time_r, dim)
+        else:
+            safe_addstr(stdscr, prog_y, text_x, f"{time_l} / {time_r}", dim)
+
+
+def draw_sidebar(stdscr, y, x, h, w, state: AppState) -> None:
+    """Right sidebar: Up Next track + playing from + key hints (no headers)."""
+    if h < 2 or w < 12:
+        return
+    dim = curses.color_pair(C_DIM) | curses.A_DIM
+    acc = curses.color_pair(accent_pair(state))
+    bright = curses.color_pair(C_BRIGHT) | curses.A_BOLD
+    cx = x + 2
+    tw = w - 3
+    line = y
+
+    # Up next track name + artist (no header)
+    info = state.up_next
+    if info.status == "OK":
+        safe_addstr(stdscr, line, cx, (info.name or "Untitled")[:tw], bright)
+        line += 1
+        if line < y + h:
+            safe_addstr(stdscr, line, cx, (info.artist or "Unknown")[:tw], dim)
+            line += 1
+    elif info.status == "END":
+        safe_addstr(stdscr, line, cx, "End of playlist", dim)
+        line += 1
+    else:
+        safe_addstr(stdscr, line, cx, "-", dim)
+        line += 1
+
+    line += 1
+    if line >= y + h:
+        return
+
+    # "from [playlist]" (no header)
+    pname = state.current_playlist_name
+    if pname:
+        safe_addstr(stdscr, line, cx, f"from {pname}"[:tw], dim)
+        line += 1
+
+    line += 1
+    if line >= y + h:
+        return
+
+    # Key hints (no "Keys" header)
+    hints = [
+        ("space", "play/pause"),
+        ("n/p", "next/prev"),
+        ("+/-", "volume"),
+        ("/", "search"),
+    ]
+    for key, desc in hints:
+        if line >= y + h:
+            break
+        safe_addstr(stdscr, line, cx, f"{key:<6}", acc | curses.A_BOLD)
+        safe_addstr(stdscr, line, cx + 6, desc[:tw - 6], dim)
+        line += 1
+
+
+def get_filtered_playlists(state: AppState) -> List[str]:
+    if not state.search_active or not state.search_query:
+        return state.playlists
+    query = state.search_query.lower()
+    return [p for p in state.playlists if query in p.lower()]
+
+
+def draw_playlists(stdscr, y, x, h, w, state: AppState) -> None:
+    if h < 1 or w < 10:
+        return
+    filtered = get_filtered_playlists(state)
+    dim = curses.color_pair(C_DIM) | curses.A_DIM
+    acc = curses.color_pair(accent_pair(state))
+    sel_cp = curses.color_pair(selected_pair(state))
+    cx = x + 2
+    tw = w - 4  # leave room for scroll bar
+
+    content_y = y
+    max_rows = h
+    state.playlist_box_info = (y, x, h, w)
+
+    if not state.playlists:
+        msg = "Loading..." if not state.playlists_loaded else "No playlists."
+        safe_addstr(stdscr, content_y, cx, msg[:tw], dim)
+        return
+    if not filtered:
+        safe_addstr(stdscr, content_y, cx, "No matches.", dim)
+        return
+
+    sel_idx = state.selected_index
+    if sel_idx >= len(filtered):
+        sel_idx = max(0, len(filtered) - 1)
+
+    start = max(0, sel_idx - max_rows + 1)
+    visible = filtered[start: start + max_rows]
+
+    for idx, name in enumerate(visible):
+        row = content_y + idx
+        if row >= y + h:
+            break
+        abs_idx = start + idx
+        is_playing = (name == state.current_playlist_name and state.current_playlist_name)
+
+        if abs_idx == sel_idx:
+            indicator = "\u25b8 " if not USE_ASCII else "> "
+            row_text = f"{indicator}{name}"
+            padded = row_text[:tw].ljust(tw)
+            safe_addstr(stdscr, row, cx, padded, sel_cp | curses.A_BOLD)
+        elif is_playing:
+            icon = "\u266b " if not USE_ASCII else "# "
+            safe_addstr(stdscr, row, cx, (icon + name)[:tw], acc)
+        else:
+            safe_addstr(stdscr, row, cx, ("  " + name)[:tw])
+
+    # Thin scroll indicator bar
+    if len(filtered) > max_rows and h > 2:
+        track_x = x + w - 1
+        track_h = max_rows
+        if track_h > 0 and len(filtered) > 0:
+            thumb_h = max(1, track_h * max_rows // len(filtered))
+            span = max(1, len(filtered) - max_rows)
+            thumb_pos = int((track_h - thumb_h) * start / span) if span > 0 else 0
+            scroll_char = BOX_V
+            for i in range(track_h):
+                row = content_y + i
+                if row >= y + h:
+                    break
+                if thumb_pos <= i < thumb_pos + thumb_h:
+                    safe_addstr(stdscr, row, track_x, scroll_char, acc | curses.A_DIM)
+
+
+def draw_status_bar(stdscr, y, width, state: AppState) -> None:
+    if y < 0 or width <= 0:
+        return
+    status = state.status or "Ready"
+    ps = state.now_playing.state.upper() if state.now_playing.state else ""
+    if USE_ASCII:
+        ind = {"PLAYING": ">", "PAUSED": "=", "STOPPED": "."}.get(ps, " ")
+    else:
+        ind = {"PLAYING": "▶", "PAUSED": "⏸", "STOPPED": "·"}.get(ps, " ")
+    line = f" {ind}  {status}"
+    bar_attr = curses.color_pair(C_STATUS)
+    safe_addstr(stdscr, y, 0, " " * (width - 1), bar_attr)
+    safe_addstr(stdscr, y, 0, line, bar_attr)
+    # Right side: ? for help
+    hint = "? help "
+    if width > len(line) + len(hint) + 2:
+        safe_addstr(stdscr, y, width - len(hint) - 1, hint, bar_attr)
+
+
+def draw_help_overlay(stdscr, height, width, state: AppState) -> None:
+    acc = curses.color_pair(accent_pair(state))
+    dim = curses.color_pair(C_DIM) | curses.A_DIM
+    bright = curses.color_pair(C_BRIGHT) | curses.A_BOLD
+
+    sections = [
+        ("PLAYBACK", [
+            ("space", "Play / Pause"),
+            ("n  p", "Next / Previous"),
+            ("o  a  s", "Play / Pause / Stop"),
+            ("x", "Shuffle"),
+            ("v", "Repeat"),
+        ]),
+        ("AUDIO", [
+            ("+ / -", "Volume up / down"),
+            ("m", "Mute / Unmute"),
+            ("< / >", "Seek back / forward"),
+        ]),
+        ("NAVIGATION", [
+            ("j  k", "Move down / up"),
+            ("enter", "Play playlist"),
+            ("g  G", "Top / Bottom"),
+            ("/", "Search"),
+            ("esc", "Cancel search"),
+        ]),
+        ("OTHER", [
+            ("r", "Refresh"),
+            ("u", "Dump UI tree"),
+            ("?", "Close help"),
+            ("q", "Quit"),
+        ]),
+    ]
+
+    # Calculate size
+    total_lines = 0
+    for title, keys in sections:
+        total_lines += 1 + len(keys) + 1  # title + keys + gap
+    total_lines -= 1  # no trailing gap
+
+    box_w = min(48, width - 4)
+    box_h = min(total_lines + 4, height - 2)
+    sy = max(0, (height - box_h) // 2)
+    sx = max(0, (width - box_w) // 2)
+
+    # Clear area
+    for row in range(box_h):
+        if sy + row < height:
+            safe_addstr(stdscr, sy + row, sx, " " * box_w)
+
+    # Top/bottom accent lines
+    line_char = "-" if USE_ASCII else "─"
+    safe_addstr(stdscr, sy, sx, line_char * box_w, acc | curses.A_DIM)
+    if sy + box_h - 1 < height:
+        safe_addstr(stdscr, sy + box_h - 1, sx, line_char * box_w, acc | curses.A_DIM)
+
+    # Title
+    safe_addstr(stdscr, sy + 1, sx + 2, "Keyboard Shortcuts", bright)
+
+    # Content
+    line = sy + 3
+    cx = sx + 2
+    kw = 12
+    for sec_idx, (title, keys) in enumerate(sections):
+        if line >= sy + box_h - 1:
+            break
+        safe_addstr(stdscr, line, cx, title, acc | curses.A_BOLD)
+        line += 1
+        for key_str, desc in keys:
+            if line >= sy + box_h - 1:
+                break
+            safe_addstr(stdscr, line, cx + 1, f"{key_str:<{kw}}", bright)
+            safe_addstr(stdscr, line, cx + 1 + kw, desc[:box_w - kw - 4], dim)
+            line += 1
+        line += 1  # gap between sections
+
+
+# ── Layout ───────────────────────────────────────────────────────────
+
+
+def draw_ui(stdscr, state: AppState) -> None:
     stdscr.erase()
     height, width = stdscr.getmaxyx()
-    draw_header(stdscr, width, state, colors)
-    if height > 2:
-        draw_header_divider(stdscr, width, colors)
 
-    content_top = 1 + HEADER_DIVIDER_ROWS
-    content_height = height - (HEADER_DIVIDER_ROWS + 3)
-    status_row = height - 2
+    PAD_LEFT = 2
+    PAD_RIGHT = 2
+    content_w = width - PAD_LEFT - PAD_RIGHT
 
-    if content_height < 6:
-        draw_status(stdscr, status_row, width, state, colors)
+    # Row 0: Header bar (full width)
+    draw_header(stdscr, width, state)
+
+    # Last row: Status bar
+    status_row = height - 1
+    draw_status_bar(stdscr, status_row, width, state)
+
+    if height < 10 or content_w < 20:
         stdscr.refresh()
         return
 
-    if width < 80:
-        now_h = 9 if content_height >= 9 else max(6, content_height // 2)
-        if content_height - now_h < 5:
-            draw_now_playing(stdscr, content_top, 0, content_height, width, state, colors)
-        else:
-            draw_now_playing(stdscr, content_top, 0, now_h, width, state, colors)
-            bottom_h = content_height - now_h
-            draw_playlists(
-                stdscr, content_top + now_h, 0, content_height - now_h, width, state, colors
-            )
+    # Rows 1-2: breathing room (blank)
+    # Rows 3-8: Now playing (6 rows)
+    np_top = 3
+    np_h = 6
+    draw_now_playing(stdscr, np_top, PAD_LEFT, np_h, content_w, state)
+
+    # Row 9: blank spacer
+    # Rows 10..height-2: bordered panels
+    panel_top = np_top + np_h + 1
+    panel_bot = height - 2
+    panel_h = panel_bot - panel_top + 1
+
+    if panel_h < 4:
+        stdscr.refresh()
+        return
+
+    # Build panel titles
+    filtered = get_filtered_playlists(state)
+    if state.search_active:
+        cursor = "\u258f" if not USE_ASCII else "|"
+        blink = cursor if int(time.time() * 2) % 2 == 0 else " "
+        left_title = f"Search: {state.search_query}{blink}"
     else:
-        left_w = width * 2 // 3
-        right_w = width - left_w
-        now_h = 9 if content_height >= 9 else max(6, content_height // 2)
-        draw_now_playing(stdscr, content_top, 0, now_h, left_w, state, colors)
-        bottom_h = content_height - now_h
-        draw_playlists(stdscr, content_top + now_h, 0, bottom_h, left_w, state, colors)
+        left_title = f"Library {len(filtered)}"
+    right_title = "Up Next"
 
-        if content_height >= 18:
-            base = content_height // 4
-            extra = content_height % 4
-            controls_h = base + (1 if extra > 0 else 0)
-            shortcuts_h = base + (1 if extra > 1 else 0)
-            queue_h = base + (1 if extra > 2 else 0)
-            stats_h = content_height - controls_h - shortcuts_h - queue_h
-            draw_controls_panel(stdscr, content_top, left_w, controls_h, right_w, state, colors)
-            draw_shortcuts_panel(
-                stdscr, content_top + controls_h, left_w, shortcuts_h, right_w, colors
-            )
-            draw_queue_panel(
-                stdscr,
-                content_top + controls_h + shortcuts_h,
-                left_w,
-                queue_h,
-                right_w,
-                state,
-                colors,
-            )
-            draw_stats_panel(
-                stdscr,
-                content_top + controls_h + shortcuts_h + queue_h,
-                left_w,
-                stats_h,
-                right_w,
-                state,
-                colors,
-            )
-        elif content_height >= 10:
-            controls_h = content_height // 2
-            shortcuts_h = content_height - controls_h
-            draw_controls_panel(stdscr, content_top, left_w, controls_h, right_w, state, colors)
-            draw_shortcuts_panel(
-                stdscr, content_top + controls_h, left_w, shortcuts_h, right_w, colors
-            )
-        else:
-            draw_controls_panel(stdscr, content_top, left_w, content_height, right_w, state, colors)
+    dim = curses.color_pair(C_DIM) | curses.A_DIM
+    acc = curses.color_pair(accent_pair(state))
 
-    draw_status(stdscr, status_row, width, state, colors)
+    if width >= 55:
+        # Wide mode: side-by-side bordered panels
+        left_w = content_w // 2
+        right_w = content_w - left_w
+        left_x = PAD_LEFT
+        right_x = PAD_LEFT + left_w
+
+        draw_panel_border(stdscr, panel_top, left_x, panel_h, left_w, left_title, acc)
+        draw_panel_border(stdscr, panel_top, right_x, panel_h, right_w, right_title, dim)
+
+        # Inner content (inset 1 from border on all sides)
+        inner_top = panel_top + 1
+        inner_h = panel_h - 2
+        if inner_h > 0:
+            draw_playlists(stdscr, inner_top, left_x + 1, inner_h, left_w - 2, state)
+            draw_sidebar(stdscr, inner_top, right_x + 1, inner_h, right_w - 2, state)
+    else:
+        # Narrow mode: no borders, stack vertically
+        safe_addstr(stdscr, panel_top, PAD_LEFT + 1, left_title, dim)
+        pl_top = panel_top + 1
+        pl_h = panel_h - 1
+        if pl_h > 0:
+            draw_playlists(stdscr, pl_top, PAD_LEFT, pl_h, content_w, state)
+
+    # Help overlay
+    if state.show_help:
+        draw_help_overlay(stdscr, height, width, state)
+
     stdscr.refresh()
 
 
+# ── Input handling ───────────────────────────────────────────────────
+
+
+def handle_search_key(state: AppState, key: int) -> bool:
+    if key == 27:  # Esc
+        state.search_active = False
+        state.search_query = ""
+        return True
+    if key in (curses.KEY_ENTER, 10, 13):
+        state.search_active = False
+        filtered = get_filtered_playlists(state)
+        if filtered:
+            sel = min(state.selected_index, len(filtered) - 1)
+            real_name = filtered[sel]
+            try:
+                state.selected_index = state.playlists.index(real_name)
+            except ValueError:
+                pass
+            threading.Thread(target=play_selected_playlist, args=(state,), daemon=True).start()
+        state.search_query = ""
+        return True
+    if key in (curses.KEY_BACKSPACE, 127, 8):
+        if state.search_query:
+            state.search_query = state.search_query[:-1]
+        return True
+    if key == curses.KEY_DOWN:
+        filtered = get_filtered_playlists(state)
+        if state.selected_index < len(filtered) - 1:
+            state.selected_index += 1
+        return True
+    if key == curses.KEY_UP:
+        if state.selected_index > 0:
+            state.selected_index -= 1
+        return True
+    if 32 <= key <= 126:
+        state.search_query += chr(key)
+        filtered = get_filtered_playlists(state)
+        if state.selected_index >= len(filtered):
+            state.selected_index = 0
+        return True
+    return True
+
+
 def handle_key(stdscr, state: AppState, key: int) -> bool:
+    if state.search_active:
+        return handle_search_key(state, key)
+
     if key in (ord("q"), ord("Q")):
         return False
+    if key == ord("?"):
+        state.show_help = not state.show_help
+        return True
+    if state.show_help:
+        state.show_help = False
+        return True
+
     if key in (curses.KEY_DOWN, ord("j")):
-        if state.selected_index < len(state.playlists) - 1:
+        filtered = get_filtered_playlists(state)
+        if state.selected_index < len(filtered) - 1:
             state.selected_index += 1
     elif key in (curses.KEY_UP, ord("k")):
         if state.selected_index > 0:
             state.selected_index -= 1
+    elif key == ord("g"):
+        state.selected_index = 0
+    elif key == ord("G"):
+        filtered = get_filtered_playlists(state)
+        if filtered:
+            state.selected_index = len(filtered) - 1
+    elif key in (curses.KEY_PPAGE,):
+        _, _, h, _ = state.playlist_box_info
+        page = max(1, h - 4)
+        state.selected_index = max(0, state.selected_index - page)
+    elif key in (curses.KEY_NPAGE,):
+        _, _, h, _ = state.playlist_box_info
+        page = max(1, h - 4)
+        filtered = get_filtered_playlists(state)
+        state.selected_index = min(len(filtered) - 1, state.selected_index + page)
     elif key in (curses.KEY_ENTER, 10, 13):
         threading.Thread(target=play_selected_playlist, args=(state,), daemon=True).start()
     elif key == ord(" "):
@@ -919,8 +1328,23 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
         threading.Thread(target=stop_track, args=(state,), daemon=True).start()
     elif key in (ord("x"), ord("X")):
         threading.Thread(target=toggle_shuffle, args=(state,), daemon=True).start()
+    elif key == ord("v"):
+        threading.Thread(target=toggle_repeat, args=(state,), daemon=True).start()
+    elif key in (ord("+"), ord("=")):
+        threading.Thread(target=set_volume, args=(state, 5), daemon=True).start()
+    elif key == ord("-"):
+        threading.Thread(target=set_volume, args=(state, -5), daemon=True).start()
+    elif key in (ord("m"), ord("M")):
+        threading.Thread(target=toggle_mute, args=(state,), daemon=True).start()
+    elif key == curses.KEY_RIGHT:
+        threading.Thread(target=seek_track, args=(state, 10.0), daemon=True).start()
+    elif key == curses.KEY_LEFT:
+        threading.Thread(target=seek_track, args=(state, -10.0), daemon=True).start()
+    elif key == ord("/"):
+        state.search_active = True
+        state.search_query = ""
     elif key in (ord("r"), ord("R")):
-        state.status = "Refreshing..."
+        set_status(state, "Refreshing...")
         threading.Thread(target=lambda: (fetch_playlists(state), fetch_now_playing(state)), daemon=True).start()
     elif key in (ord("u"), ord("U")):
         threading.Thread(target=dump_music_ui, args=(state,), daemon=True).start()
@@ -930,8 +1354,8 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
         except curses.error:
             return True
         if mouse_state & curses.BUTTON1_CLICKED:
-            for name, (y, x, w) in state.controls.items():
-                if my == y and x <= mx < x + w:
+            for name, (cy, cx, cw) in state.controls.items():
+                if my == cy and cx <= mx < cx + cw:
                     if name == "Prev":
                         threading.Thread(target=previous_track, args=(state,), daemon=True).start()
                     elif name == "Next":
@@ -944,7 +1368,30 @@ def handle_key(stdscr, state: AppState, key: int) -> bool:
                         threading.Thread(target=stop_track, args=(state,), daemon=True).start()
                     elif name == "Shuffle":
                         threading.Thread(target=toggle_shuffle, args=(state,), daemon=True).start()
+                    return True
+            py, px, ph, pw = state.playlist_box_info
+            if py <= my < py + ph and px < mx < px + pw - 1:
+                filtered = get_filtered_playlists(state)
+                if filtered:
+                    max_rows = ph
+                    sel_idx = state.selected_index
+                    if sel_idx >= len(filtered):
+                        sel_idx = max(0, len(filtered) - 1)
+                    start = max(0, sel_idx - max_rows + 1)
+                    clicked_idx = start + (my - py)
+                    if 0 <= clicked_idx < len(filtered):
+                        if state.search_active:
+                            real_name = filtered[clicked_idx]
+                            try:
+                                state.selected_index = state.playlists.index(real_name)
+                            except ValueError:
+                                state.selected_index = clicked_idx
+                        else:
+                            state.selected_index = clicked_idx
     return True
+
+
+# ── Main ─────────────────────────────────────────────────────────────
 
 
 def main(stdscr) -> None:
@@ -952,10 +1399,10 @@ def main(stdscr) -> None:
     stdscr.nodelay(True)
     stdscr.keypad(True)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
-    colors = init_colors()
+    init_colors()
 
     state = AppState()
-    state.status = "Loading..."
+    set_status(state, "Loading...")
 
     poll_thread = threading.Thread(target=background_poll, args=(state,), daemon=True)
     poll_thread.start()
@@ -971,7 +1418,11 @@ def main(stdscr) -> None:
                         state.now_playing.duration, state.now_playing.position + delta
                     )
                 state.last_position_time = now
-            draw_ui(stdscr, state, colors)
+            if (state.status and state.status != "Ready"
+                    and state.status_set_time > 0
+                    and now - state.status_set_time >= STATUS_CLEAR_SECONDS):
+                state.status = "Ready"
+            draw_ui(stdscr, state)
             key = stdscr.getch()
             if key != -1:
                 running = handle_key(stdscr, state, key)
@@ -987,111 +1438,6 @@ def run() -> None:
         return
     os.environ.setdefault("NCURSES_NO_UTF8_ACS", "1")
     curses.wrapper(main)
-
-
-def play_track(state: AppState) -> None:
-    out, err, code = run_applescript(f'tell application "{APP_NAME}" to play')
-    err_msg = format_error(err)
-    if err_msg:
-        state.status = err_msg
-    elif code != 0:
-        state.status = "AppleScript failed."
-    else:
-        state.status = "Play."
-
-
-def pause_track(state: AppState) -> None:
-    out, err, code = run_applescript(f'tell application "{APP_NAME}" to pause')
-    err_msg = format_error(err)
-    if err_msg:
-        state.status = err_msg
-    elif code != 0:
-        state.status = "AppleScript failed."
-    else:
-        state.status = "Pause."
-
-
-def stop_track(state: AppState) -> None:
-    out, err, code = run_applescript(f'tell application "{APP_NAME}" to stop')
-    err_msg = format_error(err)
-    if err_msg:
-        state.status = err_msg
-    elif code != 0:
-        state.status = "AppleScript failed."
-    else:
-        state.status = "Stop."
-
-
-def format_time(seconds: float) -> str:
-    if seconds <= 0:
-        return "--:--"
-    total = int(seconds)
-    minutes = total // 60
-    secs = total % 60
-    return f"{minutes}:{secs:02d}"
-
-
-def format_progress_bar(width: int, position: float, duration: float) -> str:
-    if width <= 0:
-        return ""
-    if duration <= 0:
-        return "-" * width
-    ratio = max(0.0, min(1.0, position / duration))
-    filled = int(ratio * width)
-    if filled <= 0:
-        return ">" + "-" * (width - 1)
-    if filled >= width:
-        return "=" * width
-    return "=" * (filled - 1) + ">" + "-" * (width - filled)
-
-
-def format_progress_line(max_width: int, position: float, duration: float) -> str:
-    time_text = f"{format_time(position)} / {format_time(duration)}"
-    if max_width <= len(time_text) + 2:
-        return time_text[:max_width]
-    bar_width = max_width - len(time_text) - 1
-    if bar_width < 10:
-        return time_text[:max_width]
-    inner = max(1, bar_width - 2)
-    if duration <= 0:
-        bar_inner = ("-" if USE_ASCII_PROGRESS else "·") * inner
-    else:
-        ratio = max(0.0, min(1.0, position / duration))
-        if USE_ASCII_PROGRESS:
-            filled = int(ratio * inner)
-            if filled <= 0:
-                bar_inner = ">" + "-" * (inner - 1)
-            elif filled >= inner:
-                bar_inner = "=" * inner
-            else:
-                bar_inner = "=" * (filled - 1) + ">" + "-" * (inner - filled)
-        else:
-            filled = ratio * inner
-            full = int(filled)
-            rem = filled - full
-            partials = ["", "▏", "▎", "▍", "▌", "▋", "▊", "▉"]
-            part_index = int(rem * 8)
-            part = partials[part_index]
-            if full >= inner:
-                bar_inner = "█" * inner
-            else:
-                bar_inner = ("█" * full) + part + (" " * max(0, inner - full - (1 if part else 0)))
-    bar = f"[{bar_inner}]" if USE_ASCII_PROGRESS else f"▏{bar_inner}▕"
-    return f"{bar} {time_text}"[:max_width]
-
-
-def make_wave_line(width: int) -> str:
-    if width <= 0:
-        return ""
-    if USE_ASCII_PROGRESS:
-        return "~" * width
-    pattern = "▁▂▃▄▅▆▇█▇▆▅▄▃▂"
-    return (pattern * (width // len(pattern) + 1))[:width]
-
-
-def state_badge(state: str) -> str:
-    label = (state or "UNKNOWN").upper()
-    return f"[{label}]"
 
 
 if __name__ == "__main__":
