@@ -293,6 +293,9 @@ struct App {
     theme_name: ThemeName,
     theme: Theme,
     progress_bar_area: Option<Rect>,
+    show_airplay: bool,
+    airplay_devices: Vec<(String, bool)>, // (name, selected)
+    airplay_list_state: ListState,
 }
 
 impl App {
@@ -313,6 +316,9 @@ impl App {
             theme_name,
             theme: theme_name.theme(),
             progress_bar_area: None,
+            show_airplay: false,
+            airplay_devices: Vec::new(),
+            airplay_list_state: ListState::default(),
         };
         app.update_filter();
         app
@@ -972,6 +978,60 @@ end tell"#,
     let _ = run_applescript(&script);
 }
 
+fn fetch_airplay_devices() -> Vec<(String, bool)> {
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        try
+            set devs to AirPlay devices
+            set out to ""
+            repeat with d in devs
+                set out to out & name of d & "\t" & (selected of d as string) & "\n"
+            end repeat
+            return out
+        end try
+    end if
+end tell
+return "NONE""#,
+        APP_NAME
+    );
+
+    match run_applescript(&script) {
+        Ok(out) => {
+            if out == "NONE" || out.is_empty() {
+                return Vec::new();
+            }
+            out.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() >= 2 {
+                        Some((parts[0].to_string(), parts[1] == "true"))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn cmd_toggle_airplay(device_name: &str) {
+    let safe = applescript_escape(device_name);
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        try
+            set d to (first AirPlay device whose name is "{}")
+            set selected of d to not selected of d
+        end try
+    end if
+end tell"#,
+        APP_NAME, safe
+    );
+    let _ = run_applescript(&script);
+}
+
 fn cmd_set_repeat(mode: &str) {
     let _ = run_applescript(&format!(
         r#"tell application "{}" to set song repeat to {}"#,
@@ -1028,6 +1088,9 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     if app.show_help {
         draw_help_overlay(f, size, &app.theme);
+    }
+    if app.show_airplay {
+        draw_airplay_overlay(f, size, app);
     }
 }
 
@@ -1774,6 +1837,61 @@ fn draw_help_overlay(f: &mut Frame, area: Rect, theme: &Theme) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+fn draw_airplay_overlay(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
+    let width = 40.min(area.width.saturating_sub(4));
+    let height = (app.airplay_devices.len() as u16 + 4).min(area.height.saturating_sub(4));
+    let x = (area.width.saturating_sub(width)) / 2;
+    let y = (area.height.saturating_sub(height)) / 2;
+    let popup = Rect::new(x, y, width, height);
+
+    f.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(Span::styled(
+            " AirPlay Devices ",
+            Style::default().fg(th.accent).bold(),
+        ))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(th.accent))
+        .style(Style::default().bg(th.surface));
+
+    if app.airplay_devices.is_empty() {
+        f.render_widget(
+            Paragraph::new(Span::styled("  No devices found", Style::default().fg(th.dim)))
+                .block(block),
+            popup,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = app
+        .airplay_devices
+        .iter()
+        .map(|(name, selected)| {
+            let icon = if *selected { "◉ " } else { "○ " };
+            let color = if *selected { th.green } else { th.text };
+            ListItem::new(Line::from(vec![
+                Span::styled(icon, Style::default().fg(color)),
+                Span::styled(name.clone(), Style::default().fg(color)),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(th.highlight_bg)
+                .fg(th.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+
+    f.render_stateful_widget(list, popup, &mut app.airplay_list_state);
+}
+
 // ── Event handling ─────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, key: KeyEvent) {
@@ -1790,9 +1908,48 @@ fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // AirPlay overlay handles its own keys
+    if app.show_airplay {
+        handle_airplay_key(app, key);
+        return;
+    }
+
     match app.input_mode {
         InputMode::Search => handle_search_key(app, key),
         InputMode::Normal => handle_normal_key(app, key),
+    }
+}
+
+fn handle_airplay_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('a') | KeyCode::Char('q') => {
+            app.show_airplay = false;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let len = app.airplay_devices.len();
+            if len > 0 {
+                let sel = app.airplay_list_state.selected().unwrap_or(0);
+                app.airplay_list_state.select(Some((sel + 1).min(len - 1)));
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if let Some(sel) = app.airplay_list_state.selected() {
+                app.airplay_list_state.select(Some(sel.saturating_sub(1)));
+            }
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            if let Some(sel) = app.airplay_list_state.selected() {
+                if let Some((name, _)) = app.airplay_devices.get(sel) {
+                    let device_name = name.clone();
+                    app.set_status(&format!("Toggling: {}", device_name));
+                    std::thread::spawn(move || cmd_toggle_airplay(&device_name));
+                    // Refresh devices after a short delay
+                    let devices = fetch_airplay_devices();
+                    app.airplay_devices = devices;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2179,6 +2336,11 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         }
         KeyCode::Char('t') | KeyCode::Char('T') => {
             app.cycle_theme();
+        }
+        KeyCode::Char('a') | KeyCode::Char('A') => {
+            app.airplay_devices = fetch_airplay_devices();
+            app.airplay_list_state.select(Some(0));
+            app.show_airplay = true;
         }
         KeyCode::F(2) => {
             app.mini_mode = !app.mini_mode;
