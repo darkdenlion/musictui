@@ -1,5 +1,5 @@
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, MouseEvent, MouseEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -144,6 +144,7 @@ struct AppState {
     pre_mute_vol: i32,
     status: String,
     status_time: Instant,
+    dirty: bool,
 }
 
 impl Default for AppState {
@@ -163,6 +164,7 @@ impl Default for AppState {
             pre_mute_vol: 50,
             status: "Loading...".into(),
             status_time: Instant::now(),
+            dirty: false,
         }
     }
 }
@@ -583,15 +585,8 @@ return "UNKNOWN""#,
 }
 
 fn fetch_volume() -> i32 {
-    let script = format!(
-        r#"tell application "{}"
-    if it is running then return sound volume as string
-end tell
-return "-1""#,
-        APP_NAME
-    );
-
-    match run_applescript(&script) {
+    let script = r#"output volume of (get volume settings)"#;
+    match run_applescript(script) {
         Ok(out) => parse_number(&out) as i32,
         Err(_) => -1,
     }
@@ -616,38 +611,89 @@ return """#,
 }
 
 fn fetch_queue(max_items: usize) -> Vec<(String, String)> {
+    // Read the actual play queue from Music UI (respects shuffle order)
     let script = format!(
-        r#"tell application "{}"
-    if it is running then
-        if player state is stopped then return "NO"
+        r#"tell application "System Events"
+    tell process "{app}"
+        set sg to splitter group 1 of window 1
+
+        -- Open playing next panel if closed
+        set wasOpen to true
+        set allGroups to groups of sg
+        repeat with g in allGroups
+            try
+                set cbs to checkboxes of g
+                repeat with cb in cbs
+                    if description of cb is "playing next" then
+                        if value of cb is 0 then
+                            set wasOpen to false
+                            click cb
+                            delay 1
+                        end if
+                    end if
+                end repeat
+            end try
+        end repeat
+
+        set out to ""
         try
-            set cp to current playlist
-            set ct to current track
-            set pid to persistent ID of ct
-            set tl to tracks of cp
-            set found to false
-            set out to ""
+            set g3 to group 3 of sg
+            set sa to scroll area 1 of g3
+            set tb to table 1 of sa
+            set allRows to rows of tb
             set cnt to 0
-            repeat with i from 1 to count of tl
-                if found then
-                    set t to item i of tl
-                    set out to out & name of t & "\t" & artist of t & "\n"
-                    set cnt to cnt + 1
-                    if cnt >= {} then exit repeat
-                end if
-                if persistent ID of item i of tl is pid then set found to true
+            repeat with r in allRows
+                try
+                    set txts to value of static text of UI element 1 of r
+                    if (count of txts) >= 2 then
+                        set songName to item 1 of txts as string
+                        -- Skip header rows
+                        if songName is not "History" and songName is not "Playing Next" and songName is not "Autoplay" then
+                            set artistAlbum to item 2 of txts as string
+                            -- Extract artist (before " — ")
+                            set oldDelims to AppleScript's text item delimiters
+                            set AppleScript's text item delimiters to " — "
+                            try
+                                set artistPart to text item 1 of artistAlbum
+                            on error
+                                set artistPart to artistAlbum
+                            end try
+                            set AppleScript's text item delimiters to oldDelims
+                            set out to out & songName & "\t" & artistPart & "\n"
+                            set cnt to cnt + 1
+                            if cnt >= {max} then exit repeat
+                        end if
+                    end if
+                end try
             end repeat
-            if out is not "" then return out
         end try
-    end if
-end tell
-return "NO""#,
-        APP_NAME, max_items
+
+        -- Close panel if we opened it
+        if not wasOpen then
+            set allGroups to groups of sg
+            repeat with g in allGroups
+                try
+                    set cbs to checkboxes of g
+                    repeat with cb in cbs
+                        if description of cb is "playing next" then
+                            click cb
+                            exit repeat
+                        end if
+                    end repeat
+                end try
+            end repeat
+        end if
+
+        return out
+    end tell
+end tell"#,
+        app = APP_NAME,
+        max = max_items
     );
 
     match run_applescript(&script) {
         Ok(out) => {
-            if out == "NO" || out.is_empty() {
+            if out.is_empty() {
                 return Vec::new();
             }
             out.lines()
@@ -761,10 +807,7 @@ end tell"#,
 }
 
 fn cmd_set_volume(vol: i32) {
-    let _ = run_applescript(&format!(
-        r#"tell application "{}" to set sound volume to {}"#,
-        APP_NAME, vol
-    ));
+    let _ = run_applescript(&format!("set volume output volume {}", vol));
 }
 
 fn cmd_seek(pos: f64) {
@@ -1261,7 +1304,9 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
             let prefix = if is_playing { "▶ " } else { "  " };
             let name_max = max_width.saturating_sub(dur.len() + prefix.len() + t.artist.len() + 5);
             let name_display = if t.name.len() > name_max {
-                format!("{}…", &t.name[..name_max.saturating_sub(1)])
+                let limit = name_max.saturating_sub(1);
+                let truncated: String = t.name.chars().take(limit).collect();
+                format!("{}…", truncated)
             } else {
                 t.name.clone()
             };
@@ -1365,10 +1410,9 @@ fn draw_up_next(f: &mut Frame, area: Rect, app: &App) {
         for (i, (name, artist)) in st.queue.iter().enumerate() {
             let num = format!("{:>2}. ", i + 1);
             let name_display = if name.len() > max_width.saturating_sub(num.len()) {
-                format!(
-                    "{}…",
-                    &name[..max_width.saturating_sub(num.len() + 1)]
-                )
+                let limit = max_width.saturating_sub(num.len() + 1);
+                let truncated: String = name.chars().take(limit).collect();
+                format!("{}…", truncated)
             } else {
                 name.clone()
             };
@@ -1549,6 +1593,12 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
 // ── Event handling ─────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, key: KeyEvent) {
+    // Ctrl+C always force-quits regardless of mode
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        app.should_quit = true;
+        return;
+    }
+
     match app.input_mode {
         InputMode::Search => handle_search_key(app, key),
         InputMode::Normal => handle_normal_key(app, key),
@@ -1593,6 +1643,7 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
                     st.status = format!("{} — {} tracks", name_clone, tracks.len());
                     st.status_time = Instant::now();
                     st.playlist_tracks = tracks;
+                    st.dirty = true;
                 });
             }
             app.input_mode = InputMode::Normal;
@@ -1894,6 +1945,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                             st.status = format!("{} — {} tracks", name_clone, tracks.len());
                             st.status_time = Instant::now();
                             st.playlist_tracks = tracks;
+                            st.dirty = true;
                         });
                     }
                 }
@@ -1931,6 +1983,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                 st.status = format!("Refreshed — {} playlists", playlists.len());
                 st.status_time = Instant::now();
                 st.playlists = playlists;
+                st.dirty = true;
             });
         }
         _ => {}
@@ -1941,6 +1994,18 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    // Panic hook: restore terminal on crash so it doesn't stay in raw mode
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            crossterm::event::DisableMouseCapture
+        );
+        default_hook(info);
+    }));
+
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(
@@ -2012,6 +2077,7 @@ async fn main() -> io::Result<()> {
                 let playlists = fetch_playlists();
                 let mut st = poll_state.lock().unwrap();
                 st.playlists = playlists;
+                st.dirty = true;
             }
         }
     });
@@ -2021,9 +2087,18 @@ async fn main() -> io::Result<()> {
     let mut last_tick = Instant::now();
 
     loop {
-        app.update_filter();
-        if matches!(app.browse_view, BrowseView::Tracks(_)) {
-            app.update_track_filter();
+        // Recalculate filters when background data changes
+        {
+            let mut st = state.lock().unwrap();
+            if st.dirty {
+                st.dirty = false;
+                drop(st);
+                if matches!(app.browse_view, BrowseView::Tracks(_)) {
+                    app.update_track_filter();
+                } else {
+                    app.update_filter();
+                }
+            }
         }
 
         // Interpolate progress
