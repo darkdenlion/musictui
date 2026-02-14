@@ -28,19 +28,123 @@ const APP_NAME: &str = "Music";
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
 const TICK_RATE: Duration = Duration::from_millis(100);
 
-// ── Colors ─────────────────────────────────────────────────────────
+// ── Themes ─────────────────────────────────────────────────────────
 
-const ACCENT: Color = Color::Rgb(100, 180, 255);
-const GREEN: Color = Color::Rgb(80, 220, 130);
-const YELLOW: Color = Color::Rgb(240, 200, 80);
-const RED: Color = Color::Rgb(240, 90, 90);
-const DIM: Color = Color::Rgb(100, 100, 115);
-const SURFACE: Color = Color::Reset;
-const SURFACE_LIGHT: Color = Color::Reset;
-const TEXT: Color = Color::Rgb(220, 220, 230);
-const TEXT_DIM: Color = Color::Rgb(140, 140, 155);
-const BORDER: Color = Color::Rgb(55, 55, 70);
-const HIGHLIGHT_BG: Color = Color::Rgb(60, 60, 80);
+#[derive(Clone, Copy, Debug)]
+struct Theme {
+    accent: Color,
+    green: Color,
+    yellow: Color,
+    red: Color,
+    dim: Color,
+    surface: Color,
+    surface_light: Color,
+    text: Color,
+    text_dim: Color,
+    border: Color,
+    highlight_bg: Color,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ThemeName {
+    Default,
+    Dracula,
+    Catppuccin,
+    Nord,
+    Gruvbox,
+}
+
+impl ThemeName {
+    fn label(&self) -> &str {
+        match self {
+            Self::Default => "Default",
+            Self::Dracula => "Dracula",
+            Self::Catppuccin => "Catppuccin",
+            Self::Nord => "Nord",
+            Self::Gruvbox => "Gruvbox",
+        }
+    }
+
+    fn next(&self) -> Self {
+        match self {
+            Self::Default => Self::Dracula,
+            Self::Dracula => Self::Catppuccin,
+            Self::Catppuccin => Self::Nord,
+            Self::Nord => Self::Gruvbox,
+            Self::Gruvbox => Self::Default,
+        }
+    }
+
+    fn theme(&self) -> Theme {
+        match self {
+            Self::Default => Theme {
+                accent: Color::Rgb(100, 180, 255),
+                green: Color::Rgb(80, 220, 130),
+                yellow: Color::Rgb(240, 200, 80),
+                red: Color::Rgb(240, 90, 90),
+                dim: Color::Rgb(100, 100, 115),
+                surface: Color::Reset,
+                surface_light: Color::Reset,
+                text: Color::Rgb(220, 220, 230),
+                text_dim: Color::Rgb(140, 140, 155),
+                border: Color::Rgb(55, 55, 70),
+                highlight_bg: Color::Rgb(60, 60, 80),
+            },
+            Self::Dracula => Theme {
+                accent: Color::Rgb(189, 147, 249),
+                green: Color::Rgb(80, 250, 123),
+                yellow: Color::Rgb(241, 250, 140),
+                red: Color::Rgb(255, 85, 85),
+                dim: Color::Rgb(98, 114, 164),
+                surface: Color::Reset,
+                surface_light: Color::Reset,
+                text: Color::Rgb(248, 248, 242),
+                text_dim: Color::Rgb(98, 114, 164),
+                border: Color::Rgb(68, 71, 90),
+                highlight_bg: Color::Rgb(68, 71, 90),
+            },
+            Self::Catppuccin => Theme {
+                accent: Color::Rgb(137, 180, 250),
+                green: Color::Rgb(166, 227, 161),
+                yellow: Color::Rgb(249, 226, 175),
+                red: Color::Rgb(243, 139, 168),
+                dim: Color::Rgb(108, 112, 134),
+                surface: Color::Reset,
+                surface_light: Color::Reset,
+                text: Color::Rgb(205, 214, 244),
+                text_dim: Color::Rgb(147, 153, 178),
+                border: Color::Rgb(69, 71, 90),
+                highlight_bg: Color::Rgb(49, 50, 68),
+            },
+            Self::Nord => Theme {
+                accent: Color::Rgb(136, 192, 208),
+                green: Color::Rgb(163, 190, 140),
+                yellow: Color::Rgb(235, 203, 139),
+                red: Color::Rgb(191, 97, 106),
+                dim: Color::Rgb(76, 86, 106),
+                surface: Color::Reset,
+                surface_light: Color::Reset,
+                text: Color::Rgb(236, 239, 244),
+                text_dim: Color::Rgb(129, 161, 193),
+                border: Color::Rgb(67, 76, 94),
+                highlight_bg: Color::Rgb(67, 76, 94),
+            },
+            Self::Gruvbox => Theme {
+                accent: Color::Rgb(131, 165, 152),
+                green: Color::Rgb(184, 187, 38),
+                yellow: Color::Rgb(250, 189, 47),
+                red: Color::Rgb(251, 73, 52),
+                dim: Color::Rgb(146, 131, 116),
+                surface: Color::Reset,
+                surface_light: Color::Reset,
+                text: Color::Rgb(235, 219, 178),
+                text_dim: Color::Rgb(168, 153, 132),
+                border: Color::Rgb(80, 73, 69),
+                highlight_bg: Color::Rgb(80, 73, 69),
+            },
+        }
+    }
+}
 
 // ── Data ───────────────────────────────────────────────────────────
 
@@ -119,11 +223,11 @@ impl PlayerState {
         }
     }
 
-    fn color(&self) -> Color {
+    fn color(&self, theme: &Theme) -> Color {
         match self {
-            Self::Playing => GREEN,
-            Self::Paused => YELLOW,
-            _ => DIM,
+            Self::Playing => theme.green,
+            Self::Paused => theme.yellow,
+            _ => theme.dim,
         }
     }
 }
@@ -185,10 +289,13 @@ struct App {
     filtered_track_indices: Vec<usize>,
     show_help: bool,
     should_quit: bool,
+    theme_name: ThemeName,
+    theme: Theme,
 }
 
 impl App {
     fn new(state: Arc<Mutex<AppState>>) -> Self {
+        let theme_name = ThemeName::Default;
         let mut app = Self {
             state,
             list_state: ListState::default(),
@@ -200,9 +307,17 @@ impl App {
             filtered_track_indices: Vec::new(),
             show_help: false,
             should_quit: false,
+            theme_name,
+            theme: theme_name.theme(),
         };
         app.update_filter();
         app
+    }
+
+    fn cycle_theme(&mut self) {
+        self.theme_name = self.theme_name.next();
+        self.theme = self.theme_name.theme();
+        self.set_status(&format!("Theme: {}", self.theme_name.label()));
     }
 
     fn update_filter(&mut self) {
@@ -887,7 +1002,7 @@ fn eq_frame() -> &'static str {
 
 fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
-    f.render_widget(Block::default().style(Style::default().bg(SURFACE)), size);
+    f.render_widget(Block::default().style(Style::default().bg(app.theme.surface)), size);
 
     let main_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -903,11 +1018,12 @@ fn draw(f: &mut Frame, app: &mut App) {
     draw_status_bar(f, main_chunks[2], app);
 
     if app.show_help {
-        draw_help_overlay(f, size);
+        draw_help_overlay(f, size, &app.theme);
     }
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
     let st = app.state.lock().unwrap();
     let state_str = match st.track.state {
         PlayerState::Playing => format!(" {} playing ", eq_frame()),
@@ -915,7 +1031,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         PlayerState::Stopped => " ⏹ stopped ".into(),
         PlayerState::NotRunning => " ○ not running ".into(),
     };
-    let state_color = st.track.state.color();
+    let state_color = st.track.state.color(th);
     drop(st);
 
     let title = " ♫ Apple Music ";
@@ -924,13 +1040,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
         .saturating_sub(title.len() as u16 + state_str.len() as u16) as usize;
 
     let header = Line::from(vec![
-        Span::styled(title, Style::default().fg(ACCENT).bold()),
-        Span::styled(" ".repeat(pad_len), Style::default().bg(SURFACE_LIGHT)),
+        Span::styled(title, Style::default().fg(th.accent).bold()),
+        Span::styled(" ".repeat(pad_len), Style::default().bg(th.surface_light)),
         Span::styled(state_str, Style::default().fg(state_color).bold()),
     ]);
 
     f.render_widget(
-        Paragraph::new(header).style(Style::default().bg(SURFACE_LIGHT)),
+        Paragraph::new(header).style(Style::default().bg(th.surface_light)),
         area,
     );
 }
@@ -969,14 +1085,15 @@ fn draw_left_panel(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_now_playing(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
     let st = app.state.lock().unwrap();
     let t = &st.track;
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(BORDER))
-        .style(Style::default().bg(SURFACE));
+        .border_style(Style::default().fg(th.border))
+        .style(Style::default().bg(th.surface));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -988,7 +1105,7 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App) {
             "Nothing playing"
         };
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(DIM)))),
+            Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(th.dim)))),
             inner,
         );
         return;
@@ -996,20 +1113,20 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App) {
 
     let mut title_spans = vec![Span::styled(
         t.name.clone(),
-        Style::default().fg(TEXT).bold(),
+        Style::default().fg(th.text).bold(),
     )];
     if t.loved == Some(true) {
-        title_spans.push(Span::styled("  ♥", Style::default().fg(RED)));
+        title_spans.push(Span::styled("  ♥", Style::default().fg(th.red)));
     }
     let title = Line::from(title_spans);
     let subtitle = Line::from(vec![
-        Span::styled(t.artist.clone(), Style::default().fg(TEXT_DIM)),
-        Span::styled("  ·  ", Style::default().fg(DIM)),
-        Span::styled(t.album.clone(), Style::default().fg(TEXT_DIM)),
+        Span::styled(t.artist.clone(), Style::default().fg(th.text_dim)),
+        Span::styled("  ·  ", Style::default().fg(th.dim)),
+        Span::styled(t.album.clone(), Style::default().fg(th.text_dim)),
     ]);
     let state_line = Line::from(Span::styled(
         format!("{} {}", t.state.icon(), t.state.label()),
-        Style::default().fg(t.state.color()),
+        Style::default().fg(t.state.color(th)),
     ));
 
     f.render_widget(
@@ -1019,6 +1136,7 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_progress_bar(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
     let st = app.state.lock().unwrap();
     let t = &st.track;
 
@@ -1026,7 +1144,7 @@ fn draw_progress_bar(f: &mut Frame, area: Rect, app: &App) {
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "  ╌╌╌ no track ╌╌╌",
-                Style::default().fg(DIM),
+                Style::default().fg(th.dim),
             ))),
             area,
         );
@@ -1043,34 +1161,35 @@ fn draw_progress_bar(f: &mut Frame, area: Rect, app: &App) {
     let empty = bar_width.saturating_sub(filled + 1);
 
     let bar = Line::from(vec![
-        Span::styled(format!("  {} ", pos_str), Style::default().fg(TEXT_DIM)),
-        Span::styled("━".repeat(filled), Style::default().fg(ACCENT)),
-        Span::styled("●", Style::default().fg(TEXT).bold()),
-        Span::styled("╌".repeat(empty), Style::default().fg(DIM)),
-        Span::styled(format!(" {} ", dur_str), Style::default().fg(TEXT_DIM)),
+        Span::styled(format!("  {} ", pos_str), Style::default().fg(th.text_dim)),
+        Span::styled("━".repeat(filled), Style::default().fg(th.accent)),
+        Span::styled("●", Style::default().fg(th.text).bold()),
+        Span::styled("╌".repeat(empty), Style::default().fg(th.dim)),
+        Span::styled(format!(" {} ", dur_str), Style::default().fg(th.text_dim)),
     ]);
 
     f.render_widget(Paragraph::new(bar), area);
 }
 
 fn draw_controls(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
     let st = app.state.lock().unwrap();
 
     let mut spans = Vec::new();
     spans.push(Span::styled("  ", Style::default()));
 
     match st.shuffle {
-        Some(true) => spans.push(Span::styled("⇆ On ", Style::default().fg(GREEN).bold())),
-        Some(false) => spans.push(Span::styled("⇆ Off ", Style::default().fg(DIM))),
-        None => spans.push(Span::styled("⇆ ─ ", Style::default().fg(DIM))),
+        Some(true) => spans.push(Span::styled("⇆ On ", Style::default().fg(th.green).bold())),
+        Some(false) => spans.push(Span::styled("⇆ Off ", Style::default().fg(th.dim))),
+        None => spans.push(Span::styled("⇆ ─ ", Style::default().fg(th.dim))),
     }
 
     spans.push(Span::styled("   ", Style::default()));
 
     match st.repeat_mode.as_deref() {
-        Some("all") => spans.push(Span::styled("↻ All ", Style::default().fg(GREEN).bold())),
-        Some("one") => spans.push(Span::styled("↻ One ", Style::default().fg(YELLOW).bold())),
-        _ => spans.push(Span::styled("↻ Off ", Style::default().fg(DIM))),
+        Some("all") => spans.push(Span::styled("↻ All ", Style::default().fg(th.green).bold())),
+        Some("one") => spans.push(Span::styled("↻ One ", Style::default().fg(th.yellow).bold())),
+        _ => spans.push(Span::styled("↻ Off ", Style::default().fg(th.dim))),
     }
 
     spans.push(Span::styled("   ", Style::default()));
@@ -1089,13 +1208,13 @@ fn draw_controls(f: &mut Frame, area: Rect, app: &App) {
         let filled = (st.volume as usize * bar_width) / 100;
         let empty = bar_width - filled;
         let vol_color = if st.volume == 0 {
-            RED
+            th.red
         } else if st.volume < 30 {
-            TEXT_DIM
+            th.text_dim
         } else if st.volume < 70 {
-            ACCENT
+            th.accent
         } else {
-            GREEN
+            th.green
         };
         spans.push(Span::styled(
             format!("{} ", vol_icon),
@@ -1107,11 +1226,11 @@ fn draw_controls(f: &mut Frame, area: Rect, app: &App) {
         ));
         spans.push(Span::styled(
             "░".repeat(empty),
-            Style::default().fg(DIM),
+            Style::default().fg(th.dim),
         ));
         spans.push(Span::styled(
             format!(" {}%", st.volume),
-            Style::default().fg(TEXT_DIM),
+            Style::default().fg(th.text_dim),
         ));
     }
 
@@ -1126,6 +1245,7 @@ fn draw_playlist(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
     let st = app.state.lock().unwrap();
     let playlists = st.playlists.clone();
     let current = st.current_playlist.clone();
@@ -1151,20 +1271,20 @@ fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
     };
 
     let border_color = match &app.input_mode {
-        InputMode::Search => ACCENT,
-        InputMode::Normal => BORDER,
+        InputMode::Search => th.accent,
+        InputMode::Normal => th.border,
     };
 
     let block = Block::default()
-        .title(Span::styled(&title, Style::default().fg(TEXT_DIM).bold()))
+        .title(Span::styled(&title, Style::default().fg(th.text_dim).bold()))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(SURFACE));
+        .style(Style::default().bg(th.surface));
 
     if playlists.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("  Loading...", Style::default().fg(DIM))).block(block),
+            Paragraph::new(Span::styled("  Loading...", Style::default().fg(th.dim))).block(block),
             area,
         );
         return;
@@ -1172,7 +1292,7 @@ fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
 
     if app.filtered_indices.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("  No matches", Style::default().fg(DIM))).block(block),
+            Paragraph::new(Span::styled("  No matches", Style::default().fg(th.dim))).block(block),
             area,
         );
         return;
@@ -1186,13 +1306,13 @@ fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
             let is_current = !current.is_empty() && name == &current;
             if is_current {
                 ListItem::new(Line::from(vec![
-                    Span::styled("♫ ", Style::default().fg(GREEN)),
-                    Span::styled(name.clone(), Style::default().fg(GREEN)),
+                    Span::styled("♫ ", Style::default().fg(th.green)),
+                    Span::styled(name.clone(), Style::default().fg(th.green)),
                 ]))
             } else {
                 ListItem::new(Line::from(vec![
                     Span::styled("  ", Style::default()),
-                    Span::styled(name.clone(), Style::default().fg(TEXT)),
+                    Span::styled(name.clone(), Style::default().fg(th.text)),
                 ]))
             }
         })
@@ -1205,8 +1325,8 @@ fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
         .block(block)
         .highlight_style(
             Style::default()
-                .bg(HIGHLIGHT_BG)
-                .fg(ACCENT)
+                .bg(th.highlight_bg)
+                .fg(th.accent)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▸ ");
@@ -1215,8 +1335,8 @@ fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
 
     if total > inner_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(ACCENT))
-            .track_style(Style::default().fg(BORDER));
+            .thumb_style(Style::default().fg(th.accent))
+            .track_style(Style::default().fg(th.border));
         let mut scrollbar_state =
             ScrollbarState::new(total).position(app.list_state.selected().unwrap_or(0));
         let scroll_area = Rect {
@@ -1230,6 +1350,7 @@ fn draw_playlist_list(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
     let st = app.state.lock().unwrap();
     let tracks = st.playlist_tracks.clone();
     let now_playing = st.track.name.clone();
@@ -1261,21 +1382,16 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
         InputMode::Normal => format!(" {} ({}) ◂ Esc ", playlist_name, app.filtered_track_indices.len()),
     };
 
-    let border_color = match &app.input_mode {
-        InputMode::Search => ACCENT,
-        InputMode::Normal => ACCENT,
-    };
-
     let block = Block::default()
-        .title(Span::styled(&title, Style::default().fg(TEXT_DIM).bold()))
+        .title(Span::styled(&title, Style::default().fg(th.text_dim).bold()))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(border_color))
-        .style(Style::default().bg(SURFACE));
+        .border_style(Style::default().fg(th.accent))
+        .style(Style::default().bg(th.surface));
 
     if tracks.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("  Loading tracks...", Style::default().fg(DIM)))
+            Paragraph::new(Span::styled("  Loading tracks...", Style::default().fg(th.dim)))
                 .block(block),
             area,
         );
@@ -1284,7 +1400,7 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
 
     if app.filtered_track_indices.is_empty() {
         f.render_widget(
-            Paragraph::new(Span::styled("  No matches", Style::default().fg(DIM))).block(block),
+            Paragraph::new(Span::styled("  No matches", Style::default().fg(th.dim))).block(block),
             area,
         );
         return;
@@ -1312,14 +1428,14 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
             };
 
             let style = if is_playing {
-                Style::default().fg(GREEN)
+                Style::default().fg(th.green)
             } else {
-                Style::default().fg(TEXT)
+                Style::default().fg(th.text)
             };
             let dim_style = if is_playing {
-                Style::default().fg(GREEN)
+                Style::default().fg(th.green)
             } else {
-                Style::default().fg(TEXT_DIM)
+                Style::default().fg(th.text_dim)
             };
 
             ListItem::new(Line::from(vec![
@@ -1339,8 +1455,8 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
         .block(block)
         .highlight_style(
             Style::default()
-                .bg(HIGHLIGHT_BG)
-                .fg(ACCENT)
+                .bg(th.highlight_bg)
+                .fg(th.accent)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("▸ ");
@@ -1349,8 +1465,8 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
 
     if total > inner_height {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .thumb_style(Style::default().fg(ACCENT))
-            .track_style(Style::default().fg(BORDER));
+            .thumb_style(Style::default().fg(th.accent))
+            .track_style(Style::default().fg(th.border));
         let mut scrollbar_state =
             ScrollbarState::new(total).position(app.track_list_state.selected().unwrap_or(0));
         let scroll_area = Rect {
@@ -1364,10 +1480,11 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_right_panel(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
     let block = Block::default()
         .borders(Borders::LEFT)
-        .border_style(Style::default().fg(BORDER))
-        .style(Style::default().bg(SURFACE));
+        .border_style(Style::default().fg(th.border))
+        .style(Style::default().bg(th.surface));
 
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -1380,21 +1497,21 @@ fn draw_right_panel(f: &mut Frame, area: Rect, app: &App) {
         .split(inner);
 
     draw_up_next(f, chunks[0], app);
-    draw_keyhints(f, chunks[2]);
+    draw_keyhints(f, chunks[2], app);
 }
 
 fn draw_up_next(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
     let st = app.state.lock().unwrap();
 
     let mut lines = Vec::new();
 
-    // Playing from
     if !st.current_playlist.is_empty() {
         lines.push(Line::from(vec![
-            Span::styled("FROM ", Style::default().fg(DIM).bold()),
+            Span::styled("FROM ", Style::default().fg(th.dim).bold()),
             Span::styled(
                 st.current_playlist.clone(),
-                Style::default().fg(TEXT).italic(),
+                Style::default().fg(th.text).italic(),
             ),
         ]));
     }
@@ -1402,7 +1519,7 @@ fn draw_up_next(f: &mut Frame, area: Rect, app: &App) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "QUEUE",
-        Style::default().fg(DIM).bold(),
+        Style::default().fg(th.dim).bold(),
     )));
 
     if !st.queue.is_empty() {
@@ -1417,39 +1534,39 @@ fn draw_up_next(f: &mut Frame, area: Rect, app: &App) {
                 name.clone()
             };
             lines.push(Line::from(vec![
-                Span::styled(num, Style::default().fg(DIM)),
-                Span::styled(name_display, Style::default().fg(TEXT)),
+                Span::styled(num, Style::default().fg(th.dim)),
+                Span::styled(name_display, Style::default().fg(th.text)),
             ]));
             if !artist.is_empty() {
                 lines.push(Line::from(Span::styled(
                     format!("    {}", artist),
-                    Style::default().fg(TEXT_DIM),
+                    Style::default().fg(th.text_dim),
                 )));
             }
         }
     } else if !st.up_next_name.is_empty() {
-        // Fallback to single up next
         lines.push(Line::from(vec![
-            Span::styled(" 1. ", Style::default().fg(DIM)),
+            Span::styled(" 1. ", Style::default().fg(th.dim)),
             Span::styled(
                 st.up_next_name.clone(),
-                Style::default().fg(TEXT),
+                Style::default().fg(th.text),
             ),
         ]));
         if !st.up_next_artist.is_empty() {
             lines.push(Line::from(Span::styled(
                 format!("    {}", st.up_next_artist),
-                Style::default().fg(TEXT_DIM),
+                Style::default().fg(th.text_dim),
             )));
         }
     } else {
-        lines.push(Line::from(Span::styled("  ─", Style::default().fg(DIM))));
+        lines.push(Line::from(Span::styled("  ─", Style::default().fg(th.dim))));
     }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
 }
 
-fn draw_keyhints(f: &mut Frame, area: Rect) {
+fn draw_keyhints(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
     let hints: Vec<(&str, &str, bool)> = vec![
         ("SHORTCUTS", "", true),
         ("Space", "play / pause", false),
@@ -1462,6 +1579,7 @@ fn draw_keyhints(f: &mut Frame, area: Rect) {
         ("/", "search", false),
         ("Enter", "open / play", false),
         ("m", "mute", false),
+        ("t", "theme", false),
         ("?", "help", false),
         ("q", "quit", false),
     ];
@@ -1470,14 +1588,14 @@ fn draw_keyhints(f: &mut Frame, area: Rect) {
         .iter()
         .map(|(key, desc, is_header)| {
             if *is_header {
-                Line::from(Span::styled(*key, Style::default().fg(DIM).bold()))
+                Line::from(Span::styled(*key, Style::default().fg(th.dim).bold()))
             } else {
                 Line::from(vec![
                     Span::styled(
                         format!("{:<8}", key),
-                        Style::default().fg(ACCENT).bold(),
+                        Style::default().fg(th.accent).bold(),
                     ),
-                    Span::styled(*desc, Style::default().fg(TEXT_DIM)),
+                    Span::styled(*desc, Style::default().fg(th.text_dim)),
                 ])
             }
         })
@@ -1487,6 +1605,7 @@ fn draw_keyhints(f: &mut Frame, area: Rect) {
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
+    let th = &app.theme;
     let (icon, status) = {
         let st = app.state.lock().unwrap();
         (st.track.state.icon().to_string(), st.status.clone())
@@ -1495,14 +1614,15 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
             format!(" {}  {} ", icon, status),
-            Style::default().fg(TEXT_DIM),
+            Style::default().fg(th.text_dim),
         )))
-        .style(Style::default().bg(SURFACE_LIGHT)),
+        .style(Style::default().bg(th.surface_light)),
         area,
     );
 }
 
-fn draw_help_overlay(f: &mut Frame, area: Rect) {
+fn draw_help_overlay(f: &mut Frame, area: Rect, theme: &Theme) {
+    let th = theme;
     let width = 52.min(area.width.saturating_sub(4));
     let height = 26.min(area.height.saturating_sub(4));
     let x = (area.width.saturating_sub(width)) / 2;
@@ -1514,12 +1634,12 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
     let block = Block::default()
         .title(Span::styled(
             " Keyboard Shortcuts ",
-            Style::default().fg(ACCENT).bold(),
+            Style::default().fg(th.accent).bold(),
         ))
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(ACCENT))
-        .style(Style::default().bg(SURFACE));
+        .border_style(Style::default().fg(th.accent))
+        .style(Style::default().bg(th.surface));
 
     let inner = block.inner(popup);
     f.render_widget(block, popup);
@@ -1560,6 +1680,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         (
             "OTHER",
             vec![
+                ("t", "Cycle theme"),
                 ("r", "Refresh playlists"),
                 ("?", "Toggle this help"),
                 ("q", "Quit"),
@@ -1574,15 +1695,15 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         }
         lines.push(Line::from(Span::styled(
             *title,
-            Style::default().fg(ACCENT).bold(),
+            Style::default().fg(th.accent).bold(),
         )));
         for (key, desc) in keys {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("  {:<14}", key),
-                    Style::default().fg(TEXT).bold(),
+                    Style::default().fg(th.text).bold(),
                 ),
-                Span::styled(*desc, Style::default().fg(TEXT_DIM)),
+                Span::styled(*desc, Style::default().fg(th.text_dim)),
             ]));
         }
     }
@@ -1985,6 +2106,9 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                 st.playlists = playlists;
                 st.dirty = true;
             });
+        }
+        KeyCode::Char('t') | KeyCode::Char('T') => {
+            app.cycle_theme();
         }
         _ => {}
     }
