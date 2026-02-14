@@ -201,17 +201,18 @@ impl App {
 
     fn update_filter(&mut self) {
         let st = self.state.lock().unwrap();
-        let query = self.search_query.to_lowercase();
+        let query = &self.search_query;
         if query.is_empty() {
             self.filtered_indices = (0..st.playlists.len()).collect();
         } else {
-            self.filtered_indices = st
+            let mut scored: Vec<(usize, i32)> = st
                 .playlists
                 .iter()
                 .enumerate()
-                .filter(|(_, name)| name.to_lowercase().contains(&query))
-                .map(|(i, _)| i)
+                .filter_map(|(i, name)| fuzzy_score(query, name).map(|s| (i, s)))
                 .collect();
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            self.filtered_indices = scored.into_iter().map(|(i, _)| i).collect();
         }
         drop(st);
 
@@ -228,20 +229,28 @@ impl App {
 
     fn update_track_filter(&mut self) {
         let st = self.state.lock().unwrap();
-        let query = self.search_query.to_lowercase();
+        let query = &self.search_query;
         if query.is_empty() {
             self.filtered_track_indices = (0..st.playlist_tracks.len()).collect();
         } else {
-            self.filtered_track_indices = st
+            let mut scored: Vec<(usize, i32)> = st
                 .playlist_tracks
                 .iter()
                 .enumerate()
-                .filter(|(_, t)| {
-                    t.name.to_lowercase().contains(&query)
-                        || t.artist.to_lowercase().contains(&query)
+                .filter_map(|(i, t)| {
+                    let name_score = fuzzy_score(query, &t.name);
+                    let artist_score = fuzzy_score(query, &t.artist);
+                    let best = match (name_score, artist_score) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    };
+                    best.map(|s| (i, s))
                 })
-                .map(|(i, _)| i)
                 .collect();
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            self.filtered_track_indices = scored.into_iter().map(|(i, _)| i).collect();
         }
         drop(st);
 
@@ -275,6 +284,51 @@ impl App {
         let mut st = self.state.lock().unwrap();
         st.status = msg.to_string();
         st.status_time = Instant::now();
+    }
+}
+
+// ── Fuzzy matching ─────────────────────────────────────────────────
+
+fn fuzzy_score(query: &str, target: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let query_lower: Vec<char> = query.to_lowercase().chars().collect();
+    let target_lower: Vec<char> = target.to_lowercase().chars().collect();
+    let target_chars: Vec<char> = target.chars().collect();
+
+    let mut qi = 0;
+    let mut score: i32 = 0;
+    let mut prev_match_idx: Option<usize> = None;
+
+    for (ti, &tc) in target_lower.iter().enumerate() {
+        if qi < query_lower.len() && tc == query_lower[qi] {
+            score += 1;
+            // Bonus for consecutive matches
+            if let Some(prev) = prev_match_idx {
+                if ti == prev + 1 {
+                    score += 5;
+                }
+            }
+            // Bonus for matching at word boundary
+            if ti == 0 || !target_chars[ti - 1].is_alphanumeric() {
+                score += 3;
+            }
+            // Bonus for case-exact match
+            if target_chars[ti] == query.chars().nth(qi).unwrap_or(' ') {
+                score += 1;
+            }
+            prev_match_idx = Some(ti);
+            qi += 1;
+        }
+    }
+
+    if qi == query_lower.len() {
+        // Bonus for shorter targets (tighter matches)
+        score += (100i32).saturating_sub(target.len() as i32);
+        Some(score)
+    } else {
+        None
     }
 }
 
