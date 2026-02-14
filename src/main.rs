@@ -133,6 +133,7 @@ struct AppState {
     playlist_tracks: Vec<PlaylistTrack>,
     up_next_name: String,
     up_next_artist: String,
+    queue: Vec<(String, String)>, // (name, artist) of upcoming tracks
     shuffle: Option<bool>,
     repeat_mode: Option<String>,
     volume: i32,
@@ -151,6 +152,7 @@ impl Default for AppState {
             playlist_tracks: Vec::new(),
             up_next_name: String::new(),
             up_next_artist: String::new(),
+            queue: Vec::new(),
             shuffle: None,
             repeat_mode: None,
             volume: -1,
@@ -599,6 +601,56 @@ return """#,
     );
 
     run_applescript(&script).unwrap_or_default()
+}
+
+fn fetch_queue(max_items: usize) -> Vec<(String, String)> {
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        if player state is stopped then return "NO"
+        try
+            set cp to current playlist
+            set ct to current track
+            set pid to persistent ID of ct
+            set tl to tracks of cp
+            set found to false
+            set out to ""
+            set cnt to 0
+            repeat with i from 1 to count of tl
+                if found then
+                    set t to item i of tl
+                    set out to out & name of t & "\t" & artist of t & "\n"
+                    set cnt to cnt + 1
+                    if cnt >= {} then exit repeat
+                end if
+                if persistent ID of item i of tl is pid then set found to true
+            end repeat
+            if out is not "" then return out
+        end try
+    end if
+end tell
+return "NO""#,
+        APP_NAME, max_items
+    );
+
+    match run_applescript(&script) {
+        Ok(out) => {
+            if out == "NO" || out.is_empty() {
+                return Vec::new();
+            }
+            out.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() >= 2 {
+                        Some((parts[0].to_string(), parts[1].to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 fn fetch_playlist_tracks(playlist_name: &str) -> Vec<PlaylistTrack> {
@@ -1216,7 +1268,7 @@ fn draw_right_panel(f: &mut Frame, area: Rect, app: &App) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Length(1), Constraint::Min(10)])
+        .constraints([Constraint::Min(8), Constraint::Length(1), Constraint::Length(14)])
         .horizontal_margin(1)
         .vertical_margin(1)
         .split(inner);
@@ -1228,39 +1280,65 @@ fn draw_right_panel(f: &mut Frame, area: Rect, app: &App) {
 fn draw_up_next(f: &mut Frame, area: Rect, app: &App) {
     let st = app.state.lock().unwrap();
 
-    let mut lines = vec![Line::from(Span::styled(
-        "UP NEXT",
-        Style::default().fg(DIM).bold(),
-    ))];
+    let mut lines = Vec::new();
 
-    if !st.up_next_name.is_empty() {
-        lines.push(Line::from(Span::styled(
-            st.up_next_name.clone(),
-            Style::default().fg(TEXT).bold(),
-        )));
-        if !st.up_next_artist.is_empty() {
-            lines.push(Line::from(Span::styled(
-                st.up_next_artist.clone(),
-                Style::default().fg(TEXT_DIM),
-            )));
-        }
-    } else {
-        lines.push(Line::from(Span::styled("─", Style::default().fg(DIM))));
+    // Playing from
+    if !st.current_playlist.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("FROM ", Style::default().fg(DIM).bold()),
+            Span::styled(
+                st.current_playlist.clone(),
+                Style::default().fg(TEXT).italic(),
+            ),
+        ]));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "PLAYING FROM",
+        "QUEUE",
         Style::default().fg(DIM).bold(),
     )));
 
-    if !st.current_playlist.is_empty() {
-        lines.push(Line::from(Span::styled(
-            st.current_playlist.clone(),
-            Style::default().fg(TEXT).italic(),
-        )));
+    if !st.queue.is_empty() {
+        let max_width = area.width.saturating_sub(4) as usize;
+        for (i, (name, artist)) in st.queue.iter().enumerate() {
+            let num = format!("{:>2}. ", i + 1);
+            let name_display = if name.len() > max_width.saturating_sub(num.len()) {
+                format!(
+                    "{}…",
+                    &name[..max_width.saturating_sub(num.len() + 1)]
+                )
+            } else {
+                name.clone()
+            };
+            lines.push(Line::from(vec![
+                Span::styled(num, Style::default().fg(DIM)),
+                Span::styled(name_display, Style::default().fg(TEXT)),
+            ]));
+            if !artist.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("    {}", artist),
+                    Style::default().fg(TEXT_DIM),
+                )));
+            }
+        }
+    } else if !st.up_next_name.is_empty() {
+        // Fallback to single up next
+        lines.push(Line::from(vec![
+            Span::styled(" 1. ", Style::default().fg(DIM)),
+            Span::styled(
+                st.up_next_name.clone(),
+                Style::default().fg(TEXT),
+            ),
+        ]));
+        if !st.up_next_artist.is_empty() {
+            lines.push(Line::from(Span::styled(
+                format!("    {}", st.up_next_artist),
+                Style::default().fg(TEXT_DIM),
+            )));
+        }
     } else {
-        lines.push(Line::from(Span::styled("─", Style::default().fg(DIM))));
+        lines.push(Line::from(Span::styled("  ─", Style::default().fg(DIM))));
     }
 
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
@@ -1802,6 +1880,7 @@ async fn main() -> io::Result<()> {
         let rpt = fetch_repeat();
         let cp = fetch_current_playlist();
         let (un, ua) = fetch_up_next();
+        let queue = fetch_queue(10);
 
         let mut st = state.lock().unwrap();
         st.playlists = playlists;
@@ -1812,6 +1891,7 @@ async fn main() -> io::Result<()> {
         st.current_playlist = cp;
         st.up_next_name = un;
         st.up_next_artist = ua;
+        st.queue = queue;
         st.last_position_time = Instant::now();
         st.status = format!("Loaded {} playlists", st.playlists.len());
         st.status_time = Instant::now();
@@ -1832,6 +1912,7 @@ async fn main() -> io::Result<()> {
             let rpt = fetch_repeat();
             let cp = fetch_current_playlist();
             let (un, ua) = fetch_up_next();
+            let queue = fetch_queue(10);
 
             let mut st = poll_state.lock().unwrap();
             st.track = track;
@@ -1841,6 +1922,7 @@ async fn main() -> io::Result<()> {
             st.current_playlist = cp;
             st.up_next_name = un;
             st.up_next_artist = ua;
+            st.queue = queue;
             st.last_position_time = Instant::now();
 
             if poll_count % 15 == 0 {
