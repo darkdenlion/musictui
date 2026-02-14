@@ -160,6 +160,7 @@ struct PlaylistTrack {
 enum BrowseView {
     Playlists,
     Tracks(String), // playlist name
+    GlobalSearch,
 }
 
 #[derive(Clone, Debug)]
@@ -296,6 +297,9 @@ struct App {
     show_airplay: bool,
     airplay_devices: Vec<(String, bool)>, // (name, selected)
     airplay_list_state: ListState,
+    global_search_results: Vec<PlaylistTrack>,
+    global_search_state: ListState,
+    global_search_query: String,
 }
 
 impl App {
@@ -319,6 +323,9 @@ impl App {
             show_airplay: false,
             airplay_devices: Vec::new(),
             airplay_list_state: ListState::default(),
+            global_search_results: Vec::new(),
+            global_search_state: ListState::default(),
+            global_search_query: String::new(),
         };
         app.update_filter();
         app
@@ -1016,6 +1023,76 @@ return "NONE""#,
     }
 }
 
+fn fetch_library_search(query: &str, max_results: usize) -> Vec<PlaylistTrack> {
+    let safe = applescript_escape(query);
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        try
+            set results to (search playlist "Library" for "{}" only songs)
+            set out to ""
+            set cnt to 0
+            repeat with t in results
+                set out to out & name of t & "\t" & artist of t & "\t" & (duration of t as string) & "\t" & (index of t as string) & "\n"
+                set cnt to cnt + 1
+                if cnt >= {} then exit repeat
+            end repeat
+            return out
+        end try
+    end if
+end tell
+return "NONE""#,
+        APP_NAME, safe, max_results
+    );
+
+    match run_applescript(&script) {
+        Ok(out) => {
+            if out == "NONE" || out.is_empty() {
+                return Vec::new();
+            }
+            out.lines()
+                .filter_map(|line| {
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() >= 3 {
+                        Some(PlaylistTrack {
+                            name: parts[0].to_string(),
+                            artist: parts[1].to_string(),
+                            duration: parse_number(parts[2]),
+                            index: parts.get(3).map(|s| parse_number(s) as usize).unwrap_or(0),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+fn cmd_play_library_track(track_name: &str, artist: &str) {
+    let safe_name = applescript_escape(track_name);
+    let safe_artist = applescript_escape(artist);
+    let script = format!(
+        r#"tell application "{}"
+    if it is running then
+        try
+            set results to (search playlist "Library" for "{}" only songs)
+            repeat with t in results
+                if name of t is "{}" and artist of t is "{}" then
+                    play t
+                    return "OK"
+                end if
+            end repeat
+        end try
+    end if
+end tell
+return "FAIL""#,
+        APP_NAME, safe_name, safe_name, safe_artist
+    );
+    let _ = run_applescript(&script);
+}
+
 fn cmd_toggle_airplay(device_name: &str) {
     let safe = applescript_escape(device_name);
     let script = format!(
@@ -1367,6 +1444,7 @@ fn draw_playlist(f: &mut Frame, area: Rect, app: &mut App) {
     match &app.browse_view {
         BrowseView::Playlists => draw_playlist_list(f, area, app),
         BrowseView::Tracks(_) => draw_track_list(f, area, app),
+        BrowseView::GlobalSearch => draw_global_search(f, area, app),
     }
 }
 
@@ -1595,6 +1673,127 @@ fn draw_track_list(f: &mut Frame, area: Rect, app: &mut App) {
             .track_style(Style::default().fg(th.border));
         let mut scrollbar_state =
             ScrollbarState::new(total).position(app.track_list_state.selected().unwrap_or(0));
+        let scroll_area = Rect {
+            x: area.x,
+            y: area.y + 1,
+            width: area.width,
+            height: area.height.saturating_sub(2),
+        };
+        f.render_stateful_widget(scrollbar, scroll_area, &mut scrollbar_state);
+    }
+}
+
+fn draw_global_search(f: &mut Frame, area: Rect, app: &mut App) {
+    let th = app.theme;
+    let st = app.state.lock().unwrap();
+    let now_playing = st.track.name.clone();
+    let now_artist = st.track.artist.clone();
+    drop(st);
+
+    let title = match &app.input_mode {
+        InputMode::Search => {
+            let blink = if (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                / 500)
+                % 2
+                == 0
+            {
+                "▏"
+            } else {
+                " "
+            };
+            format!(" Library Search: {}{} ", app.global_search_query, blink)
+        }
+        InputMode::Normal => format!(
+            " Library Search: {} ({}) ◂ Esc ",
+            app.global_search_query,
+            app.global_search_results.len()
+        ),
+    };
+
+    let block = Block::default()
+        .title(Span::styled(&title, Style::default().fg(th.text_dim).bold()))
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(th.accent))
+        .style(Style::default().bg(th.surface));
+
+    if app.global_search_results.is_empty() {
+        let msg = if app.global_search_query.is_empty() {
+            "  Type to search your library..."
+        } else {
+            "  No results"
+        };
+        f.render_widget(
+            Paragraph::new(Span::styled(msg, Style::default().fg(th.dim))).block(block),
+            area,
+        );
+        return;
+    }
+
+    let max_width = area.width.saturating_sub(8) as usize;
+
+    let items: Vec<ListItem> = app
+        .global_search_results
+        .iter()
+        .map(|t| {
+            let is_playing =
+                !now_playing.is_empty() && t.name == now_playing && t.artist == now_artist;
+            let dur = format_time(t.duration);
+            let prefix = if is_playing { "▶ " } else { "  " };
+            let name_max = max_width.saturating_sub(dur.len() + prefix.len() + t.artist.len() + 5);
+            let name_display = if t.name.len() > name_max {
+                let limit = name_max.saturating_sub(1);
+                let truncated: String = t.name.chars().take(limit).collect();
+                format!("{}…", truncated)
+            } else {
+                t.name.clone()
+            };
+
+            let style = if is_playing {
+                Style::default().fg(th.green)
+            } else {
+                Style::default().fg(th.text)
+            };
+            let dim_style = if is_playing {
+                Style::default().fg(th.green)
+            } else {
+                Style::default().fg(th.text_dim)
+            };
+
+            ListItem::new(Line::from(vec![
+                Span::styled(prefix, style),
+                Span::styled(name_display, style),
+                Span::styled("  ", Style::default()),
+                Span::styled(&t.artist, dim_style),
+                Span::styled(format!("  {}", dur), dim_style),
+            ]))
+        })
+        .collect();
+
+    let total = app.global_search_results.len();
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(th.highlight_bg)
+                .fg(th.accent)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+
+    f.render_stateful_widget(list, area, &mut app.global_search_state);
+
+    if total > inner_height {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::default().fg(th.accent))
+            .track_style(Style::default().fg(th.border));
+        let mut scrollbar_state = ScrollbarState::new(total)
+            .position(app.global_search_state.selected().unwrap_or(0));
         let scroll_area = Rect {
             x: area.x,
             y: area.y + 1,
@@ -1920,6 +2119,60 @@ fn handle_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn handle_global_search_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => {
+            app.input_mode = InputMode::Normal;
+            if app.global_search_results.is_empty() {
+                app.browse_view = BrowseView::Playlists;
+                app.update_filter();
+            }
+        }
+        KeyCode::Enter => {
+            app.input_mode = InputMode::Normal;
+            // If we have a selected result, play it
+            if let Some(sel) = app.global_search_state.selected() {
+                if let Some(track) = app.global_search_results.get(sel) {
+                    let name = track.name.clone();
+                    let artist = track.artist.clone();
+                    app.set_status(&format!("Playing: {}", name));
+                    std::thread::spawn(move || cmd_play_library_track(&name, &artist));
+                }
+            } else if !app.global_search_query.is_empty() {
+                // Execute the search
+                let query = app.global_search_query.clone();
+                app.set_status(&format!("Searching: {}", query));
+                let results = fetch_library_search(&query, 50);
+                app.set_status(&format!("Found {} results", results.len()));
+                app.global_search_results = results;
+                if !app.global_search_results.is_empty() {
+                    app.global_search_state.select(Some(0));
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            app.global_search_query.pop();
+        }
+        KeyCode::Down => {
+            let len = app.global_search_results.len();
+            if len > 0 {
+                let sel = app.global_search_state.selected().unwrap_or(0);
+                app.global_search_state.select(Some((sel + 1).min(len - 1)));
+            }
+        }
+        KeyCode::Up => {
+            if let Some(sel) = app.global_search_state.selected() {
+                app.global_search_state
+                    .select(Some(sel.saturating_sub(1)));
+            }
+        }
+        KeyCode::Char(c) => {
+            app.global_search_query.push(c);
+        }
+        _ => {}
+    }
+}
+
 fn handle_airplay_key(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Esc | KeyCode::Char('a') | KeyCode::Char('q') => {
@@ -1955,6 +2208,12 @@ fn handle_airplay_key(app: &mut App, key: KeyEvent) {
 
 fn handle_search_key(app: &mut App, key: KeyEvent) {
     let in_tracks = matches!(app.browse_view, BrowseView::Tracks(_));
+    let in_global = matches!(app.browse_view, BrowseView::GlobalSearch);
+
+    if in_global {
+        handle_global_search_key(app, key);
+        return;
+    }
 
     match key.code {
         KeyCode::Esc => {
@@ -2040,6 +2299,7 @@ fn active_list_len(app: &App) -> usize {
     match app.browse_view {
         BrowseView::Playlists => app.filtered_indices.len(),
         BrowseView::Tracks(_) => app.filtered_track_indices.len(),
+        BrowseView::GlobalSearch => app.global_search_results.len(),
     }
 }
 
@@ -2047,6 +2307,7 @@ fn active_list_state(app: &mut App) -> &mut ListState {
     match app.browse_view {
         BrowseView::Playlists => &mut app.list_state,
         BrowseView::Tracks(_) => &mut app.track_list_state,
+        BrowseView::GlobalSearch => &mut app.global_search_state,
     }
 }
 
@@ -2058,7 +2319,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
 
     match key.code {
         KeyCode::Char('q') | KeyCode::Char('Q') => {
-            if matches!(app.browse_view, BrowseView::Tracks(_)) {
+            if matches!(app.browse_view, BrowseView::Tracks(_) | BrowseView::GlobalSearch) {
                 app.browse_view = BrowseView::Playlists;
                 app.search_query.clear();
                 app.update_filter();
@@ -2271,7 +2532,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Esc => {
-            if matches!(app.browse_view, BrowseView::Tracks(_)) {
+            if matches!(app.browse_view, BrowseView::Tracks(_) | BrowseView::GlobalSearch) {
                 app.browse_view = BrowseView::Playlists;
                 app.search_query.clear();
                 app.update_filter();
@@ -2308,6 +2569,16 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                         });
                     }
                 }
+                BrowseView::GlobalSearch => {
+                    if let Some(sel) = app.global_search_state.selected() {
+                        if let Some(track) = app.global_search_results.get(sel) {
+                            let name = track.name.clone();
+                            let artist = track.artist.clone();
+                            app.set_status(&format!("Playing: {}", name));
+                            std::thread::spawn(move || cmd_play_library_track(&name, &artist));
+                        }
+                    }
+                }
             }
         }
         KeyCode::Tab => {
@@ -2319,8 +2590,25 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('/') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) || matches!(app.browse_view, BrowseView::GlobalSearch) {
+                // Enter global search mode
+                app.browse_view = BrowseView::GlobalSearch;
+                app.input_mode = InputMode::Search;
+                app.global_search_query.clear();
+                app.global_search_results.clear();
+                app.global_search_state.select(None);
+            } else {
+                app.input_mode = InputMode::Search;
+                app.search_query.clear();
+            }
+        }
+        KeyCode::F(1) => {
+            // F1 opens global search
+            app.browse_view = BrowseView::GlobalSearch;
             app.input_mode = InputMode::Search;
-            app.search_query.clear();
+            app.global_search_query.clear();
+            app.global_search_results.clear();
+            app.global_search_state.select(None);
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             let state = app.state.clone();
