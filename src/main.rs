@@ -292,6 +292,7 @@ struct App {
     mini_mode: bool,
     theme_name: ThemeName,
     theme: Theme,
+    progress_bar_area: Option<Rect>,
 }
 
 impl App {
@@ -311,6 +312,7 @@ impl App {
             mini_mode: false,
             theme_name,
             theme: theme_name.theme(),
+            progress_bar_area: None,
         };
         app.update_filter();
         app
@@ -1195,7 +1197,8 @@ fn draw_now_playing(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-fn draw_progress_bar(f: &mut Frame, area: Rect, app: &App) {
+fn draw_progress_bar(f: &mut Frame, area: Rect, app: &mut App) {
+    app.progress_bar_area = Some(area);
     let th = &app.theme;
     let st = app.state.lock().unwrap();
     let t = &st.track;
@@ -2339,6 +2342,38 @@ async fn main() -> io::Result<()> {
                     let ls = active_list_state(&mut app);
                     if let Some(sel) = ls.selected() {
                         ls.select(Some(sel.saturating_sub(3)));
+                    }
+                }
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+                    column,
+                    row,
+                    ..
+                }) => {
+                    if let Some(bar_area) = app.progress_bar_area {
+                        if row == bar_area.y
+                            && column >= bar_area.x
+                            && column < bar_area.x + bar_area.width
+                        {
+                            let st = app.state.lock().unwrap();
+                            let duration = st.track.duration;
+                            drop(st);
+                            if duration > 0.0 {
+                                let ratio =
+                                    (column - bar_area.x) as f64 / bar_area.width as f64;
+                                let new_pos = (ratio * duration).clamp(0.0, duration);
+                                {
+                                    let mut st = app.state.lock().unwrap();
+                                    st.track.position = new_pos;
+                                    st.last_position_time = Instant::now();
+                                }
+                                app.set_status(&format!(
+                                    "Seek to {}",
+                                    format_time(new_pos)
+                                ));
+                                std::thread::spawn(move || cmd_seek(new_pos));
+                            }
+                        }
                     }
                 }
                 _ => {}
