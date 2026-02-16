@@ -1348,17 +1348,6 @@ fn format_time(seconds: f64) -> String {
     format!("{}:{:02}", m, s)
 }
 
-fn eq_frame() -> &'static str {
-    const EQ_FRAMES: &[&str] = &[
-        "▁▃▅▇▅▃", "▃▅▇▅▃▁", "▅▇▅▃▁▃", "▇▅▃▁▃▅", "▅▃▁▃▅▇", "▃▁▃▅▇▅",
-    ];
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    EQ_FRAMES[(ms / 250) as usize % EQ_FRAMES.len()]
-}
-
 // ── Drawing ────────────────────────────────────────────────────────
 
 fn draw(f: &mut Frame, app: &mut App) {
@@ -1450,8 +1439,8 @@ fn draw_mini(f: &mut Frame, area: Rect, app: &App) {
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let th = &app.theme;
     let st = app.state.lock().unwrap();
-    let state_str = match st.track.state {
-        PlayerState::Playing => format!(" {} playing ", eq_frame()),
+    let state_str: String = match st.track.state {
+        PlayerState::Playing => " ● playing ".into(),
         PlayerState::Paused => " ⏸ paused ".into(),
         PlayerState::Stopped => " ⏹ stopped ".into(),
         PlayerState::NotRunning => " ○ not running ".into(),
